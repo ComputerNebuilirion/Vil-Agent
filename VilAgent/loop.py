@@ -1,0 +1,459 @@
+"""Agent 执行循环：ReAct（Reason + Act）"""
+import functools
+import json
+import time
+from pathlib import Path
+from typing import Awaitable, Callable
+
+from .context import Context
+from .llm import LLMClient, LLMError
+from .safety import classify
+from .safety.permissions import PermissionSystem, ALLOW, ASK, DENY
+from .session import SessionManager
+from .state import State
+from .tools import execute_tool, get_tool_schemas, tool_is_readonly
+
+PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+# 工具结果喂回 LLM 前的字符上限（head+tail，避免单步超大输出撑爆上下文）
+_TOOL_RESULT_MAX_CHARS = 4000
+
+
+def _truncate_tool_result(text: str, max_chars: int = _TOOL_RESULT_MAX_CHARS) -> str:
+    """超长工具结果截成 head+tail，保留首尾（错误信息常在末尾）"""
+    if not isinstance(text, str) or len(text) <= max_chars:
+        return text
+    half = max_chars // 2
+    return (text[:half] + f"\n...[truncated {len(text) - max_chars} chars]...\n"
+            + text[-half:])
+
+# 模式 → 提示词文件名（追加在 system.txt 之后）
+_MODE_PROMPT = {
+    "ask": "ask",
+    "do": "do",
+    "review": "review",
+}
+
+
+class AgentLoop:
+    """
+    ReAct Agent 循环
+
+    模式:
+      ask    - 只读分析/规划（仅 readonly 工具，由工具过滤强制）
+      do     - 执行（全部工具，默认 trust=True）
+      review - 代码审查（只读，结构化反馈）
+    """
+
+    def __init__(
+        self,
+        llm: LLMClient,
+        state: State,
+        context: Context,
+        max_steps: int = 50,
+        mode: str = "ask",
+        trust: bool = False,
+        stream: bool = False,
+        permission_handler: Callable[[dict], Awaitable[str]] | None = None,
+        permissions_file: Path | str | None = None,
+        context_budget: int | None = None,
+        session_id: str = "",
+        session_manager: SessionManager | None = None,
+    ):
+        self.llm = llm
+        self.state = state
+        self.context = context
+        self.max_steps = max_steps
+        self.mode = mode
+        self.trust = trust
+        self.stream = stream
+        self.permission_handler = permission_handler
+        # token 预算：超此值时摘要旧消息（None=不启用，用原条数滑窗）
+        self.context_budget = context_budget
+        self.session_id = session_id
+        self.session_manager = session_manager
+        # 最近一次统计（供外部查询，如中断时显示部分完成的统计）
+        self.last_stats: dict | None = None
+
+        # do 模式默认开启 trust（允许写操作）
+        if mode == "do":
+            self.trust = True
+
+        # L2 权限系统
+        self.permissions = PermissionSystem(
+            rules_file=permissions_file, trust=self.trust
+        )
+
+        # 运行时上下文，透传给工具函数（_ctx 参数）
+        self._ctx = {
+            "workspace": str(context.workspace),
+            "trust": self.trust,
+            "mode": self.mode,
+            "session_id": session_id,
+            "sessions_dir": str(session_manager.dir) if session_manager else "",
+        }
+
+    async def run(self, task: str, callback: Callable[[dict], Awaitable[None]] | None = None) -> str:
+        """
+        ReAct 循环：构建 messages → llm.chat → 有 tool_calls 则执行并喂回 → 否则完成
+
+        :param task: 用户任务文本
+        :param callback: 事件回调，接收 dict：
+            {"event": "start"|"step"|"content_delta"|"tool_call"|"tool_result"|"done"|"error"|"max_steps"|"loop_detected"|"interrupted", ...}
+        :return: 最终 assistant 文本
+        """
+        await self._emit(callback, {"event": "start", "task": task, "mode": self.mode})
+
+        # 记录用户任务到历史
+        user_msg = {"role": "user", "content": task}
+        self.state.append(user_msg)
+
+        # 长会话摘要：run 开始时检查是否有足够的旧消息需要摘要
+        # 花 1 次小 LLM 调用，换后续每步不再重发旧历史——净省 token
+        await self._maybe_summarize(callback)
+
+        messages = self._build_messages(user_msg)
+
+        # ask / review 模式只暴露只读工具
+        readonly_only = self.mode in ("ask", "review")
+        tools = get_tool_schemas(readonly_only=readonly_only)
+
+        # 统计：总耗时 + 累加 token 用量
+        t_start = time.perf_counter()
+        usage_acc = {
+            "prompt_tokens": 0, "completion_tokens": 0,
+            "total_tokens": 0, "reasoning_tokens": 0,
+        }
+        step = 0  # 防 except 块 NameError
+
+        # 循环检测：记录最近 3 步的 tool_calls 签名
+        step_signatures: list[str] = []
+
+        try:
+            for step in range(1, self.max_steps + 1):
+                await self._emit(callback, {"event": "step", "step": step})
+
+                try:
+                    assistant = await self.llm.chat(
+                        messages=messages,
+                        tools=tools,
+                        stream=self.stream,
+                        on_chunk=functools.partial(self._on_chunk, callback=callback),
+                    )
+                except LLMError as e:
+                    await self._emit(callback, {"event": "error", "message": str(e)})
+                    raise
+
+                # 累加该步 token 用量 + 回传每步延迟
+                self._accumulate_usage(usage_acc, self.llm.last_usage)
+                await self._emit(callback, {
+                    "event": "llm_response",
+                    "step": step,
+                    "latency_s": round(self.llm.last_latency or 0, 2),
+                    "usage": self.llm.last_usage,
+                })
+
+                messages.append(assistant)
+                self.state.append(assistant)
+
+                tool_calls = assistant.get("tool_calls")
+                if not tool_calls:
+                    # 无 tool_calls → 任务完成
+                    content = assistant.get("content") or ""
+                    self.state.truncate()
+                    await self._emit(callback, {"event": "done", "content": content})
+                    await self._emit_stats(callback, step, t_start, usage_acc)
+                    return content
+
+                # 循环检测：记录本步 tool_calls 签名
+                sig = self._compute_step_signature(tool_calls)
+                step_signatures.append(sig)
+                if len(step_signatures) > 3:
+                    step_signatures.pop(0)
+                # 连续 3 步相同签名 → 死循环
+                if len(step_signatures) == 3 and len(set(step_signatures)) == 1:
+                    await self._emit(callback, {
+                        "event": "loop_detected",
+                        "step": step,
+                        "pattern": sig[:80],
+                    })
+                    self.state.truncate()
+                    await self._emit_stats(callback, step, t_start, usage_acc,
+                                           status="loop_detected")
+                    return "(agent loop detected)"
+
+                # 执行所有 tool_calls
+                for tc in tool_calls:
+                    fn = tc.get("function", {})
+                    name = fn.get("name", "")
+                    try:
+                        args = json.loads(fn["arguments"]) if fn.get("arguments") else {}
+                    except json.JSONDecodeError as e:
+                        args = {}
+                        result = f"Error: invalid arguments JSON: {e}"
+                        await self._emit(callback, {
+                            "event": "tool_call", "name": name, "args": args
+                        })
+                        await self._emit(callback, {
+                            "event": "tool_result", "name": name, "result": result
+                        })
+                        tool_msg = {
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": _truncate_tool_result(result),
+                        }
+                        messages.append(tool_msg)
+                        self.state.append(tool_msg)
+                        continue
+
+                    await self._emit(callback, {
+                        "event": "tool_call", "name": name, "args": args
+                    })
+
+                    # L1 风险分类（仅对执行代码的工具）
+                    readonly = tool_is_readonly(name)
+                    risk = None
+                    if name == "run_python" and "code" in args:
+                        cls = classify(args["code"])
+                        risk = cls["risk"]
+                        await self._emit(callback, {
+                            "event": "risk_report", "name": name,
+                            "risk": cls["risk"], "cmd_type": cls["cmd_type"],
+                            "reasons": cls["reasons"],
+                        })
+
+                    # L2 权限决策
+                    action = self.permissions.evaluate(
+                        name, args, readonly=readonly, risk=risk
+                    )
+                    if action == ASK and self.permission_handler:
+                        action = await self.permission_handler({
+                            "tool": name, "args": args,
+                            "risk": risk, "proposed": ASK,
+                        })
+                    await self._emit(callback, {
+                        "event": "permission_decision",
+                        "name": name, "action": action,
+                    })
+
+                    if action != ALLOW:
+                        result = (f"Error: permission denied for '{name}' "
+                                  f"(action={action})")
+                    else:
+                        result = execute_tool(name, args, self._ctx)
+
+                    # write_file 覆盖模式产生的 diff：只给人看，不进 tool_msg，
+                    # LLM 不见，省 token。在 tool_result 之前 emit，view 先渲染 diff。
+                    file_diff = self._ctx.pop("_file_diff", None)
+                    if file_diff:
+                        await self._emit(callback, {
+                            "event": "file_diff", "name": name,
+                            "path": file_diff["path"],
+                            "old": file_diff["old"], "new": file_diff["new"],
+                        })
+
+                    await self._emit(callback, {
+                        "event": "tool_result", "name": name, "result": result
+                    })
+
+                    tool_msg = {
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": _truncate_tool_result(result),
+                    }
+                    messages.append(tool_msg)
+                    self.state.append(tool_msg)
+
+            # 达到最大步数仍未完成
+            await self._emit(callback, {"event": "max_steps", "max_steps": self.max_steps})
+            await self._emit_stats(callback, self.max_steps, t_start, usage_acc,
+                                   status="max_steps")
+            # 标记 <new_task/> 让前端提示用户 /new 切换 session
+            return f"(已达最大步数 {self.max_steps}，建议 /new 切换会话)<new_task/>"
+
+        except KeyboardInterrupt:
+            # 用户 Ctrl+C 中止：已写入的历史保留（jsonl append 模式），
+            # 发 interrupted 事件 + 最终 stats（带 status="interrupted" 标记）
+            try:
+                await self._emit(callback, {
+                    "event": "interrupted",
+                    "reason": "user",
+                    "step": step,
+                    "message": "用户中止",
+                })
+                self.state.truncate()
+                await self._emit_stats(callback, step, t_start, usage_acc,
+                                       status="interrupted")
+            except Exception:
+                pass  # 防止用户连按 Ctrl+C 时再次中断 stats 输出
+            return "(user interrupted)"
+
+    @staticmethod
+    def _compute_step_signature(tool_calls: list[dict]) -> str:
+        """单步 tool_calls 签名：sorted(name + args dict)。
+        用于循环检测：连续 3 步完全相同签名 = 死循环。
+        """
+        if not tool_calls:
+            return ""
+        parts = []
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            name = fn.get("name", "")
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except Exception:
+                args = {}
+            args_key = json.dumps(args, sort_keys=True, ensure_ascii=False)
+            parts.append(f"{name}:{args_key}")
+        return "|".join(sorted(parts))
+
+    def _build_messages(self, user_msg: dict) -> list[dict]:
+        """构建初始 messages：system（含 context）+ 历史 + 当前 user 任务"""
+        system_prompt = self._load_system_prompt()
+        messages: list[dict] = [{"role": "system", "content": system_prompt}]
+
+        # 加载历史。若启用 token 预算，走摘要压缩路径；否则用原条数滑窗。
+        if self.context_budget is not None:
+            for msg in self.state.all_messages(
+                compress=True, token_budget=self.context_budget
+            ):
+                if msg.get("role") != "system":
+                    messages.append(msg)
+        else:
+            for msg in self.state.all_messages(compress=True):
+                if msg.get("role") != "system":
+                    messages.append(msg)
+
+        return messages
+
+    async def _maybe_summarize(self, callback) -> None:
+        """检查并生成旧消息摘要。
+
+        触发条件：历史消息数 > keep_recent + 阈值，且有未被摘要覆盖的旧消息。
+        策略：取旧消息打包成文本，调 LLM 生成摘要，缓存到 .summary.json。
+        失败时静默降级（_build_messages 会回退到占位符压缩）。
+        """
+        if self.context_budget is None:
+            return  # 未启用 token 预算模式
+
+        KEEP_RECENT = 10
+        MIN_TO_SUMMARIZE = 5  # 至少 5 条旧消息才值得摘要
+
+        old_msgs = self.state.get_messages_to_summarize(keep_recent=KEEP_RECENT)
+        if len(old_msgs) < MIN_TO_SUMMARIZE:
+            return
+
+        # 打包旧消息为文本
+        lines = []
+        for m in old_msgs:
+            role = m.get("role", "?")
+            content = m.get("content", "")
+            if isinstance(content, list):
+                content = json.dumps(content, ensure_ascii=False)
+            tc = m.get("tool_calls")
+            if tc:
+                names = [t.get("function", {}).get("name", "?") for t in tc]
+                lines.append(f"[{role}] (tool_calls: {', '.join(names)}) {content}")
+            else:
+                lines.append(f"[{role}] {content}")
+
+        text = "\n".join(lines)
+        # 摘要请求本身也要控制 token：超长则截断
+        MAX_SUMMARY_INPUT = 8000
+        if len(text) > MAX_SUMMARY_INPUT:
+            text = text[:MAX_SUMMARY_INPUT] + "\n...[truncated]..."
+
+        prompt = (
+            "Summarize the following conversation history concisely.\n"
+            "Focus on: decisions made, files/paths mentioned, errors encountered, "
+            "task progress. Keep under 300 tokens.\n\n"
+            f"History:\n{text}"
+        )
+
+        try:
+            result = await self.llm.chat(
+                messages=[{"role": "user", "content": prompt}],
+                stream=False,
+            )
+            summary = (result.get("content") or "").strip()
+            if summary:
+                covered = len(self.state.load()) - KEEP_RECENT
+                self.state._save_summary(summary, covered)
+                await self._emit(callback, {
+                    "event": "summary",
+                    "covered_count": covered,
+                    "summary_tokens": len(summary) // 3,  # 粗估
+                })
+        except Exception:
+            # 摘要失败静默降级：_build_messages 会回退到占位符压缩
+            pass
+
+    def _load_system_prompt(self) -> str:
+        """加载 system.txt 并注入 {{context}}，再按模式追加 mode 提示词"""
+        base_path = PROMPTS_DIR / "system.txt"
+        if not base_path.exists():
+            base = "You are a code agent with tools. Context:\n{{context}}"
+        else:
+            base = base_path.read_text(encoding="utf-8")
+
+        ctx_text = self.context.render_for_prompt()
+        prompt = base.replace("{{context}}", ctx_text)
+
+        mode_name = _MODE_PROMPT.get(self.mode)
+        if mode_name:
+            mode_path = PROMPTS_DIR / f"{mode_name}.txt"
+            if mode_path.exists():
+                prompt += "\n\n" + mode_path.read_text(encoding="utf-8")
+
+        # 注入当前 todo 状态（如有），让 agent 知道之前规划的进度
+        if self.session_manager and self.session_id:
+            todos = self.session_manager.get_todos(self.session_id)
+            if todos:
+                todo_lines = ["\n## 当前任务进度（由 todo_write 工具规划）"]
+                for t in todos:
+                    icon = {"pending": "○", "in_progress": "◐",
+                            "completed": "●"}.get(t.get("status", ""), "○")
+                    todo_lines.append(
+                        f"{icon} [{t.get('status', '?')}] {t.get('content', '')}"
+                    )
+                todo_lines.append(
+                    "使用 todo_write 工具更新进度（传完整列表替换）。"
+                    "完成某项时标记为 completed。"
+                )
+                prompt += "\n" + "\n".join(todo_lines)
+
+        return prompt
+
+    async def _on_chunk(self, chunk: dict, callback) -> None:
+        """流式 chunk 转发：只转发 content delta，tool_call_delta 太碎不转发"""
+        if not callback:
+            return
+        if chunk.get("type") == "content":
+            await callback({"event": "content_delta", "chunk": chunk["chunk"]})
+
+    async def _emit(self, callback, event: dict) -> None:
+        if callback:
+            await callback(event)
+
+    @staticmethod
+    def _accumulate_usage(acc: dict, usage: dict | None) -> None:
+        """把单步 usage 累加进总量（reasoning 是 completion 的子集，不重复计）"""
+        if not usage:
+            return
+        acc["prompt_tokens"] += usage.get("prompt_tokens", 0) or 0
+        acc["completion_tokens"] += usage.get("completion_tokens", 0) or 0
+        acc["total_tokens"] += usage.get("total_tokens", 0) or 0
+        details = usage.get("completion_tokens_details") or {}
+        acc["reasoning_tokens"] += details.get("reasoning_tokens", 0) or 0
+
+    async def _emit_stats(self, callback, steps: int, t_start: float,
+                          usage_acc: dict, status: str = "done") -> None:
+        stats = {
+            "event": "stats",
+            "steps": steps,
+            "elapsed_s": round(time.perf_counter() - t_start, 2),
+            "usage": dict(usage_acc),
+            "status": status,
+        }
+        self.last_stats = stats
+        await self._emit(callback, stats)

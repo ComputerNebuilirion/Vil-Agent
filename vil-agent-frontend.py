@@ -1,0 +1,833 @@
+"""vil-agent-frontend: VilAgent 的多轮 REPL 前端
+
+交互模式：一个 session 内多轮 user 输入，agent 跨轮利用上下文。
+每轮用 ask/do/review 前缀切换模式（不带前缀用默认 mode）。
+
+用法:
+    python vil-agent-frontend.py
+    python vil-agent-frontend.py --continue last
+    python vil-agent-frontend.py --mode do
+
+REPL 命令:
+    :ask <task>           只读分析/规划
+    :do <task>            执行（允许写操作）
+    :review <task>        代码审查
+    /help                 显示此帮助
+    /exit  /quit          退出
+    /sessions             列出所有会话
+    /switch <id>          切换到指定会话
+    /history              显示当前会话最近消息
+    /export [sid] [-o f]  导出会话为 Markdown（默认当前会话）
+    /clear                清空当前会话历史
+    /mode `ask/do/review` 查看/切换默认 mode
+    /tokens               显示当前会话累计 token
+    /config [get|set|list|path] 配置管理（在 REPL 内修改 config.json）
+"""
+import argparse
+import asyncio
+import sys
+import time
+from pathlib import Path
+
+from VilAgent import SessionManager, State
+from VilAgent.agent_app import (
+    AgentModel, TerminalView,
+    SESSIONS_DIR, console as _console,
+)
+from rich.box import ROUNDED
+from rich.console import Group
+from rich.panel import Panel
+from rich.text import Text
+from VilAgent.config import (
+    CONFIG_FILE, load_config, set_value, get_value,
+)
+
+# 写类模式：trust=True
+_WRITE_MODES = {"do"}
+
+_HELP = """\
+REPL 命令:
+  :ask <task>            只读分析/规划
+  :do <task>             执行（允许写操作）
+  :review <task>         代码审查
+  <不带前缀>              用默认 mode 跑
+会话命令:
+  /new                   开新 session（保留旧的，可 /switch 回看）
+  /sessions              列出所有会话
+  /switch <id>           切换到指定会话
+  /history               显示当前会话最近消息
+  /export \\[sid] [-o f]   导出会话为 Markdown（默认当前会话）
+  /clear                 清空当前会话历史（需确认）
+  /delete <id>           永久删除会话（需确认，默认当前）
+  /deleteall             永久删除所有会话（需确认）
+  /mode \\[ask|do|review]  查看/切换默认 mode
+  /tokens                显示当前会话累计 token
+配置命令:
+  /config                列出所有配置（隐藏 api_key）
+  /config get <key>      读取配置（dotted 路径，如 llm.endpoint）
+  /config set <key> <v>  设置配置（自动 JSON parse，true/false/数字/null）
+  /config path           显示 config.json 路径
+  /help                   本帮助
+  /exit                   退出
+当 agent 检测到当前输入跟前面任务明显不相关时，会自动提示 /new 切换。
+"""
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="vil-agent-frontend",
+        description="Vil Agent HCI Frontend - Vil Agent 交互式前端（多轮 REPL）",
+    )
+    p.add_argument("--continue", dest="continue_session", metavar="SESSION",
+                   help="续接指定会话 ID（'last' 表示最近一次）")
+    p.add_argument("--new", action="store_true",
+                   help="强制新建 session（默认行为是续接上次会话）")
+    p.add_argument("--mode", default="ask", choices=["ask", "do", "review"],
+                   help="默认模式（用户输入不带 mode 前缀时用）")
+    p.add_argument("--max-steps", type=int, default=None, help="最大步数（默认 50）")
+    p.add_argument("--no-stream", action="store_true", help="关闭流式输出")
+    return p
+
+
+# —— REPL 命令处理 ——
+
+# 标签样式映射：key 为标签名，value 为 Rich style
+_TAG_STYLES = {
+    "session": "bold green",
+    "error": "bold red",
+    "history": "bold yellow",
+    "config": "bold cyan",
+    "interrupt": "bold magenta",
+}
+
+# 单个反斜杠：Rich markup 里用来转义字面 [，避免被当成标签
+_BS = "\\"
+
+
+def _tag(tag: str) -> str:
+    """生成带 Rich markup 的标签字符串，如 _tag('session') → '[bold green]\\[session][/bold green]'"""
+    style = _TAG_STYLES.get(tag, "bold")
+    return f"[{style}]{_BS}[{tag}][/{style}]"
+
+def _cmd_sessions(sm: SessionManager) -> None:
+    items = sm.list_all()
+    if not items:
+        _console.print(f"{_tag('history')} (空)")
+        return
+    _console.print(f"{'ID':<14} {'MODE':<8} {'STEPS':<6} {'TOKENS':<8} "
+                   f"{'UPDATED':<17} {'TASK'}")
+    for it in items[:20]:
+        task = (it.get("task") or "")[:50]
+        ts = it.get("last_active_at", 0)
+        updated = (time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+                   if ts else "?")
+        _console.print(f"{it['id']:<14} {it.get('mode','?'):<8} "
+                       f"{it.get('steps_total',0):<6} "
+                       f"{it.get('tokens_total',0):<8} "
+                       f"{updated:<17} {task}")
+    _console.print(f"{_tag('history')} 共 {len(items)} 个会话，显示最近 "
+                   f"{min(20, len(items))} 个")
+
+
+def _cmd_history(state: State, n: int = 20) -> None:
+    msgs = state.load()
+    if not msgs:
+        _console.print(f"{_tag('history')} (空)")
+        return
+    # 角色样式表：前缀符号 + 颜色 + 标签（无 emoji）
+    role_styles = {
+        "user":      ("> ",  "bold cyan",    "USER"),
+        "assistant": ("< ",  "bold magenta", "ASSISTANT"),
+        "tool":      ("# ",  "dim yellow",   "TOOL"),
+        "system":    ("* ",  "dim",          "SYSTEM"),
+    }
+    for m in msgs[-n:]:
+        role = m.get("role", "?")
+        content = m.get("content", "")
+        # 处理 content：可能是 str / list（多模态）/ 含 tool_calls
+        tool_calls = m.get("tool_calls")
+        if tool_calls:
+            # assistant 带 tool_calls：列出调用的工具
+            calls = ", ".join(
+                tc.get("function", {}).get("name", "?") for tc in tool_calls
+            ) if isinstance(tool_calls, list) else str(tool_calls)
+            icon, style, label = role_styles.get("assistant", ("", "", "ASSISTANT"))
+            _console.print(f"[{style}]{icon}{label} → call: {calls}[/]")
+            continue
+        if isinstance(content, str):
+            preview = content
+        elif isinstance(content, list):
+            # 拼接 list（多模态/分段）
+            parts = []
+            for seg in content:
+                if isinstance(seg, dict):
+                    if seg.get("type") == "text":
+                        parts.append(seg.get("text", ""))
+                    else:
+                        parts.append(f"<{seg.get('type', '?')}>")
+                else:
+                    parts.append(str(seg))
+            preview = "\n".join(p for p in parts if p)
+        else:
+            preview = str(content)
+        # 截断过长内容
+        if len(preview) > 200:
+            preview = preview[:200] + "..."
+        icon, style, label = role_styles.get(role, ("", "", role.upper()))
+        # 多行内容用缩进对齐
+        if "\n" in preview:
+            indented = preview.replace("\n", "\n    ")
+            _console.print(f"[{style}]{icon}{label}[/]\n    [dim]{indented}[/]")
+        else:
+            _console.print(f"[{style}]{icon}{label}[/] [dim]{preview}[/]")
+    _console.print(f"{_tag('history')} 共 {len(msgs)} 条，显示最近 "
+                   f"{min(n, len(msgs))} 条")
+
+
+def _cmd_tokens(sm: SessionManager, sid: str) -> None:
+    meta = sm.get(sid) or {}
+    _console.print(f"{_tag('session')} {sid} tokens={meta.get('tokens_total', 0)} "
+                   f"steps={meta.get('steps_total', 0)} "
+                   f"status={meta.get('status', '?')}")
+
+
+def _cmd_export(line: str, sm: SessionManager, current_sid: str) -> None:
+    """导出会话为 Markdown：/export [sid] [-o out.md]"""
+    from pathlib import Path
+
+    parts = line.split()
+    target_sid = current_sid
+    out_path = None
+
+    # 解析：/export [sid] [-o path]
+    i = 1
+    while i < len(parts):
+        if parts[i] == "-o" and i + 1 < len(parts):
+            out_path = parts[i + 1]
+            i += 2
+        else:
+            target_sid = parts[i]
+            i += 1
+
+    # 支持前缀匹配
+    if not sm.get(target_sid):
+        matches = [s["id"] for s in sm.list_all()
+                   if s["id"].startswith(target_sid)]
+        if len(matches) == 1:
+            target_sid = matches[0]
+        elif not matches:
+            _console.print(f"{_tag('error')} 找不到会话 {target_sid}")
+            return
+        else:
+            _console.print(
+                f"{_tag('error')} 匹配多个会话: "
+                f"{' '.join(m[:6] for m in matches)}，请输更长的前缀"
+            )
+            return
+
+    state = State(sm.path_for(target_sid))
+    msgs = state.load()
+    if not msgs:
+        _console.print(f"{_tag('error')} 会话 {target_sid[:6]} 无消息可导出")
+        return
+
+    md = sm.export_markdown(target_sid, msgs)
+    if out_path is None:
+        out_path = f"session_{target_sid}.md"
+    Path(out_path).write_text(md, encoding="utf-8")
+    _console.print(f"{_tag('session')} 已导出 {target_sid[:6]} → {out_path}（{len(msgs)} 条消息）")
+
+
+def _cmd_config(line: str) -> None:
+    """REPL 内 config 命令：/config [get <key> | set <key> <v> | path | list]"""
+    import json
+    parts = line.split(maxsplit=3)
+    sub = parts[1] if len(parts) > 1 else "list"
+
+    if sub == "path":
+        _console.print(f"{_tag('config')} {CONFIG_FILE}")
+        return
+
+    if sub == "get":
+        if len(parts) < 3:
+            _console.print(f"{_tag('config')} 用法: /config get <key>（如 llm.endpoint）")
+            return
+        key = parts[2]
+        val = get_value(key)
+        if val is None and key != "llm.api_key":
+            _console.print(f"{_tag('config')} {key} 未设置")
+        elif key == "llm.api_key":
+            _console.print(f"{_tag('config')} {key} = (hidden, 长度 {len(str(val or ''))})")
+        else:
+            _console.print(f"{_tag('config')} {key} = {val!r}")
+        return
+
+    if sub == "set":
+        if len(parts) < 4:
+            _console.print(f"{_tag('config')} 用法: /config set <key> <value>")
+            return
+        key, raw = parts[2], parts[3]
+        # 自动 JSON parse：true/false/数字/null/对象/数组
+        try:
+            val = json.loads(raw)
+        except json.JSONDecodeError:
+            val = raw  # 当字符串
+        set_value(key, val)
+        _console.print(f"{_tag('config')} 已设置 {key} = {val!r}")
+        # 提示哪些配置需要重启生效
+        if key.startswith("llm."):
+            _console.print("[dim]⚠ llm.* 配置修改后需重启 frontend 才生效[/dim]")
+        else:
+            _console.print(f"[dim]✓ {key} 下次轮询自动生效[/dim]")
+        return
+
+    if sub == "list":
+        cfg = load_config()
+        # 隐藏 api_key
+        if isinstance(cfg.get("llm"), dict) and "api_key" in cfg["llm"]:
+            cfg = json.loads(json.dumps(cfg))  # deep copy
+            ak = cfg["llm"].get("api_key") or ""
+            cfg["llm"]["api_key"] = f"(hidden, 长度 {len(ak)})"
+        _console.print(f"{_tag('config')} 当前配置:")
+        for k, v in cfg.items():
+            if isinstance(v, dict):
+                _console.print(f"  [bold]{k}[/bold]:")
+                for sk, sv in v.items():
+                    _console.print(f"    [dim]{sk}[/dim]: {sv!r}")
+            else:
+                _console.print(f"  [bold]{k}[/bold]: {v!r}")
+        _console.print(f"[dim]路径: {CONFIG_FILE}[/dim]")
+        return
+
+    _console.print(f"{_tag('config')} 子命令: get / set / list / path")
+
+
+def _confirm_dangerous(action_desc: str) -> bool:
+    """危险操作二次确认（Minecraft 删除世界风格）"""
+    _console.print(
+        f"[bold red]⚠ 你确定要永久{action_desc}吗？此操作无法撤销！（真的很久！）[/bold red]"
+    )
+    try:
+        ans = input("  确认？[y/N] > ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return ans in ("y", "yes", "是")
+
+
+# —— 核心 REPL 循环 ——
+
+def repl_loop(model: AgentModel, view: TerminalView,
+               sm: SessionManager, sid: str, state: State,
+               args: argparse.Namespace) -> None:
+    default_mode = args.mode
+    cfg = model.cfg
+
+    while True:
+        # 提示符：[sid] (mode) >
+        # 用 Rich markup（Rich 内部处理 Windows ANSI）
+        mode_style = {"ask": "bold green", "do": "bold red",
+                      "review": "bold blue"}.get(default_mode, "bold green")
+        prompt = (
+            f"[bold cyan] Vil [/bold cyan]"
+            f"[bold yellow][{sid[:6]}][/bold yellow] "
+            f"[{mode_style}]({default_mode})[/{mode_style}] "
+            f"[bold bright_black]>[/bold bright_black] "
+        )
+        try:
+            line = _console.input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            _console.print()
+            _console.print(f"{_tag('interrupt')} 已返回提示符")
+            continue
+
+        line = line.strip()
+        if not line:
+            continue
+
+        # —— 命令分支 ——
+        if line in ("/exit", "/quit"):
+            break
+        if line in ("/help", "/h", "?"):
+            _console.print(_HELP)
+            continue
+        if line == "/config" or line.startswith("/config "):
+            _cmd_config(line)
+            continue
+        if line == "/sessions":
+            _cmd_sessions(sm)
+            continue
+        if line == "/history":
+            _cmd_history(state)
+            continue
+        if line.startswith("/export"):
+            _cmd_export(line, sm, sid)
+            continue
+        if line == "/tokens":
+            _cmd_tokens(sm, sid)
+            continue
+        if line == "/clear":
+            meta = sm.get(sid) or {}
+            if not _confirm_dangerous(
+                    f"清空会话 {sid[:6]} 的历史（{meta.get('steps_total', 0)} 步、"
+                    f"{meta.get('tokens_total', 0)} tokens 将丢失）"):
+                _console.print("[dim]已取消[/dim]")
+                continue
+            state.clear()
+            sm.update(sid, tokens_total=0, steps_total=0,
+                      summary="", status="active")
+            _console.print(f"{_tag('session')} 已清空 {sid[:6]}")
+            continue
+        if line == "/deleteall" or line.startswith("/deleteall "):
+            # 删除所有会话（mc 风格二次确认）
+            all_sessions = sm.list_all()
+            total_steps = sum(s.get("steps_total", 0) for s in all_sessions)
+            total_tokens = sum(s.get("tokens_total", 0) for s in all_sessions)
+            desc = (f"删除所有 {len(all_sessions)} 个会话（共 {total_steps} 步、"
+                    f"{total_tokens} tokens，将连同文件一并删除）")
+            if not _confirm_dangerous(desc):
+                _console.print("[dim]已取消[/dim]")
+                continue
+            removed = sm.delete_all()
+            _console.print(f"{_tag('session')} 已删除 {removed} 个会话")
+            # 必须开新 session（当前也已被删）
+            sid = sm.create(mode=default_mode, task="(新会话)")
+            state = State(sm.path_for(sid))
+            sm.set_current(sid)
+            _console.print(f"{_tag('session')} 已开新 session {sid[:6]}")
+            continue
+        if line.startswith("/delete") or line.startswith("/del"):
+            parts = line.split()
+            target_sid = parts[1] if len(parts) > 1 else sid
+            # 支持前缀匹配（输 6 位短 id 也能找到）
+            if not sm.get(target_sid):
+                matches = [s["id"] for s in sm.list_all()
+                           if s["id"].startswith(target_sid)]
+                if len(matches) == 1:
+                    target_sid = matches[0]
+                elif not matches:
+                    _console.print(f"{_tag('error')} 找不到会话 {target_sid}")
+                    continue
+                else:
+                    _console.print(
+                        f"{_tag('error')} 匹配多个会话: "
+                        f"{' / '.join(m[:6] for m in matches)}，请输更长的前缀"
+                    )
+                    continue
+            meta = sm.get(target_sid) or {}
+            desc = (f"删除会话 {target_sid[:6]}（{meta.get('mode', '?')} 模式、"
+                    f"{meta.get('steps_total', 0)} 步、"
+                    f"{meta.get('tokens_total', 0)} tokens，将连同文件一并删除）")
+            if not _confirm_dangerous(desc):
+                _console.print("[dim]已取消[/dim]")
+                continue
+            if sm.delete(target_sid):
+                _console.print(f"{_tag('session')} 已删除会话 {target_sid[:6]}")
+                if target_sid == sid:
+                    # 删的就是当前 session → 切回上次活跃的，没有就开新
+                    prev_sid = sm.last_session_id()
+                    if prev_sid:
+                        sid = prev_sid
+                        sm.update(sid, status="active", mode=default_mode)
+                        state = State(sm.path_for(sid))
+                        sm.set_current(sid)
+                        meta = sm.get(sid) or {}
+                        _console.print(
+                            f"{_tag('session')} 已切回上次会话 {sid[:6]} · "
+                            f"{meta.get('mode', '?')} 模式 · "
+                            f"{meta.get('steps_total', 0)} 步累计 · "
+                            f"{meta.get('tokens_total', 0)} tokens"
+                        )
+                    else:
+                        sid = sm.create(mode=default_mode, task="(新会话)")
+                        state = State(sm.path_for(sid))
+                        sm.set_current(sid)
+                        _console.print(
+                            f"{_tag('session')} 没有可切回的会话，已开新 session {sid[:6]}"
+                        )
+            else:
+                _console.print(f"{_tag('session')} 删除失败（会话不存在？）")
+            continue
+        if line == "/new":
+            # 开新 session（保留旧的，可 /switch 回看）
+            # 同时把当前 default_mode 带过去
+            sid = sm.create(mode=default_mode, task="(新会话)")
+            state = State(sm.path_for(sid))
+            sm.set_current(sid)
+            _console.print(f"{_tag('session')} 已切换到新 session {sid}")
+            continue
+        if line.startswith("/mode"):
+            parts = line.split()
+            if len(parts) == 1:
+                _console.print(f"当前默认 mode: {default_mode}")
+            elif parts[1] in ("ask", "do", "review"):
+                default_mode = parts[1]
+                _console.print(f"默认 mode → {default_mode}")
+            else:
+                _console.print(f"{_tag('error')} 未知 mode: {parts[1]}")
+            continue
+        if line.startswith("/switch "):
+            new_sid = line[len("/switch "):].strip()
+            if not sm.get(new_sid):
+                matches = [s["id"] for s in sm.list_all()
+                           if s["id"].startswith(new_sid)]
+                if len(matches) == 1:
+                    new_sid = matches[0]
+                elif not matches:
+                    _console.print(f"{_tag('error')} 找不到会话 {new_sid}")
+                    continue
+                else:
+                    _console.print(
+                        f"{_tag('error')} 匹配多个会话: "
+                        f"{' / '.join(m for m in matches)}，请输更长的前缀"
+                    )
+                    continue
+            sid = new_sid
+            state = State(sm.path_for(sid))
+            sm.set_current(sid)
+            _console.print(f"{_tag('session')} 切换到 {sid}")
+            continue
+        if line.startswith("/"):
+            _console.print(f"{_tag('error')} 未知命令: {line}（/help 查看可用命令）")
+            continue
+
+        # —— 任务执行 ——
+        parts = line.split(maxsplit=1)
+        if parts[0] in (":ask", ":do", ":review"):
+            mode = parts[0][1:]  # 去掉冒号 → "do"
+            task = parts[1].strip() if len(parts) > 1 else ""
+        else:
+            mode = default_mode
+            task = line
+
+        if not task:
+            _console.print(f"{_tag('error')} 任务不能为空")
+            continue
+
+        trust = mode in _WRITE_MODES
+        stream = not args.no_stream and cfg.get("stream", True)
+        max_steps = args.max_steps or cfg.get("max_steps", 50)
+
+        # 每轮新建 AgentLoop：mode/trust 可能切换；State 共享 → 跨轮上下文
+        agent = model.build_agent(
+            mode=mode, trust=trust, stream=stream,
+            max_steps=max_steps,
+            permission_handler=view.prompt_permission,
+            state=state,
+            session_id=sid,
+            session_manager=sm,
+        )
+        sm.update(sid, mode=mode, status="active")
+        view.reset_for_new_run()
+
+        # 联合 callback：view 渲染 + 累加 stats 写回 session + 检测 <new_task/> 标记
+        last = {"content": "", "new_task": False, "max_steps_hit": False}
+        meta = sm.get(sid) or {}
+        tok_acc = meta.get("tokens_total", 0)
+        step_acc = meta.get("steps_total", 0)
+
+        async def on_event(event: dict) -> None:
+            nonlocal tok_acc, step_acc
+            await view.on_event(event)
+            e = event.get("event")
+            if e == "done":
+                content = event.get("content", "") or ""
+                last["content"] = content
+                # 检测 agent 输出的 <new_task/> 标记（view 已静默过滤渲染，
+                # 但这里看原始 content 触发用户提示）
+                if "<new_task/>" in content:
+                    last["new_task"] = True
+            elif e == "max_steps":
+                # 达到最大步数：标记，让 stats 后提示 /new
+                last["max_steps_hit"] = True
+            elif e == "stats":
+                tok_acc += event["usage"].get("total_tokens", 0)
+                step_acc += event["steps"]
+                # status 从 loop.py 透传：done / interrupted / loop_detected / max_steps
+                status = event.get("status", "done")
+                # active 表示 session 仍可用；done/interrupted/loop_detected/max_steps
+                # 都是单次 run 结束的终态标记，写到 summary 字段；
+                # session.status 仍按是否还在 REPL 内区分 active/done
+                sm.update(sid, tokens_total=tok_acc, steps_total=step_acc,
+                          status="active", summary=last["content"][:200],
+                          last_status=status)
+                # run 结束后提示用户切换 session
+                if last.get("max_steps_hit"):
+                    _console.print(
+                        f"[yellow]⚠ 当前会话已达最大步数，建议 /new 开启新会话 "
+                        f"(累计 {step_acc} 步、{tok_acc} tokens)[/yellow]"
+                    )
+                    last["max_steps_hit"] = False
+                elif last.get("new_task"):
+                    _console.print(
+                        f"[yellow]⚠ 检测到新任务，建议 /new 切换会话 "
+                        f"(累计 {step_acc} 步、{tok_acc} tokens)[/yellow]"
+                    )
+                    last["new_task"] = False
+
+        try:
+            model.ensure_loop()  # 跨 asyncio.run() 时重置 httpx transport
+            asyncio.run(agent.run(task, callback=on_event))
+        except KeyboardInterrupt:
+            view._close_content(preserve=False)
+            view._stop_thinking()
+            _console.print()
+            # 显示已完成的部分统计（优先 agent 内部存的，兜底 view 存的）
+            stats = agent.last_stats or view._last_stats
+            if stats:
+                u = stats["usage"]
+                # 补更新 session 元数据（防止 stats 事件没发出去导致 session 记录落后）
+                sm.update(sid, tokens_total=u["total_tokens"],
+                          steps_total=stats["steps"],
+                          last_status="interrupted")
+                _console.print(
+                    f"[dim]截至中断: {stats['steps']} 步 · "
+                    f"[cyan]↑{u['prompt_tokens']} tokens[/cyan] "
+                    f"[magenta]↓{u['completion_tokens']} tokens[/magenta] "
+                    f"[bold]Σ {u['total_tokens']} tokens[/bold][/dim]"
+                )
+            _console.print(f"{_tag('interrupt')} 用户中止，已返回提示符")
+        except Exception as e:
+            view._close_content(preserve=False)
+            _console.print(f"{_tag('error')} {e}")
+
+
+def run_frontend(args: argparse.Namespace) -> None:
+    model = AgentModel()
+    view = TerminalView()
+
+    sm = SessionManager(SESSIONS_DIR)
+
+    # 启动时清理空 session（启动后立刻 /exit 残留的）
+    removed = sm.cleanup_empty()
+    if removed:
+        _console.print(f"[dim]{_tag('session')} 清理了 {removed} 个空 session[/dim]")
+
+    cont = args.continue_session
+    force_new = args.new
+    # 优先级：--continue <sid> > --new > 默认（续接上次会话或新建）
+    if cont:
+        sid = cont
+        if sid == "last":
+            # 优先用持久化的"当前会话"指针（/switch 后重启也能精确恢复），
+            # 指针失效再按最近活跃时间兜底
+            sid = sm.get_current() or sm.last_session_id() or ""
+            if not sid:
+                raise SystemExit(f"{_tag('session')} 没有可续接的会话")
+        if not sm.get(sid):
+            raise SystemExit(f"{_tag('session')} 会话 {sid} 不存在")
+        sm.update(sid, status="active", mode=args.mode)
+        resumed = True
+    elif force_new:
+        sid = sm.create(mode=args.mode, task="(交互式会话)")
+        resumed = False
+    else:
+        # 默认：优先精确恢复上次使用的会话（.current 指针），否则新建
+        last_sid = sm.get_current() or sm.last_session_id()
+        if last_sid and sm.get(last_sid):
+            sid = last_sid
+            meta = sm.get(sid)
+            sm.update(sid, status="active", mode=args.mode)
+            resumed = True
+        else:
+            sid = sm.create(mode=args.mode, task="(交互式会话)")
+            resumed = False
+
+    sm.set_current(sid)  # 记录当前会话，/switch、崩溃后重启均可靠恢复
+    state = State(sm.path_for(sid))
+
+    _render_banner(_console, sm, sid, resumed, args)
+
+    try:
+        repl_loop(model, view, sm, sid, state, args)
+    finally:
+        asyncio.run(model.close())
+        # 收尾会话必须取 repl_loop 最终所在的会话（内部可能 /switch 过），
+        # 否则 done 状态和 last_active_at 会写回旧会话，导致下次恢复错乱
+        final_sid = sm.get_current() or sid
+        sm.update(final_sid, status="done")
+
+
+def _render_banner(console, sm, sid: str, resumed: bool, args) -> None:
+    """Claude Code 风格启动 banner：圆角矩形 + 上下左右完整边框"""
+    from VilAgent.config import __version__ as _ver
+
+    cfg = load_config()
+    ws = Path.cwd()
+    mode = (sm.get(sid) or {}).get("mode") or args.mode or "ask"
+    mode_color = "bold green" if mode == "ask" else ("bold red" if mode == "do" else "bold yellow")
+    max_steps = args.max_steps or cfg.get("max_steps") or 50
+    llm = cfg.get("llm", {}) or {}
+    model_name = llm.get("model") or "?"
+
+    # Panel 内宽 = 控制台宽度 - 左右边框(2) - padding 左右(2)
+    try:
+        console_width = console.size.width
+    except (AttributeError, OSError):
+        console_width = 80
+    panel_width = max(60, console_width - 4)
+
+    lines = []
+
+    # 1. Logo 行（两端对齐：左 logo，右版本号）
+    logo = Text()
+    logo.append("●  ", style="cyan")
+    logo.append("Vil Agent HCI Frontend", style="bold cyan")
+    right = Text(f"v{_ver}", style="dim")
+    lines.append(_justify_row(logo, right, width=panel_width))
+
+    # 2. 模式 chip（ask=绿 do=红 review=黄）
+    mode_line = Text()
+    mode_line.append("  mode:  ", style="dim")
+    mode_line.append(mode.upper().ljust(6), style=mode_color)
+    lines.append(mode_line)
+
+    # 3. cwd
+    info_line = Text()
+    info_line.append("  cwd:   ", style="dim")
+    info_line.append(str(ws), style="")
+    lines.append(info_line)
+
+    # 4. model + max_steps
+    model_line = Text()
+    model_line.append("  model: ", style="dim")
+    model_line.append(model_name, style="")
+    model_line.append("  ·  单任务max_steps: ", style="dim")
+    model_line.append(str(max_steps), style="")
+    lines.append(model_line)
+
+    # 5. 分隔线（按 Panel 内宽精确拼 cell_len，前导 2 空格 + ─ 填满）
+    sep_dashes = max(40, panel_width - 2)
+    sep_line = Text()
+    sep_line.append("  ", style="default")
+    sep_line.append("─" * sep_dashes, style="cyan")
+    lines.append(sep_line)
+
+    # 6. 快捷提示（两行：模式前缀 + 自然语言导航）
+    # 模式行
+    sh_mode = Text()
+    sh_mode.append("  模式: ", style="dim")
+    sh_mode.append(":ask", style="bold")
+    sh_mode.append(" 只读 · ", style="dim")
+    sh_mode.append(":do", style="bold")
+    sh_mode.append(" 执行 · ", style="dim")
+    sh_mode.append(":review", style="bold")
+    sh_mode.append(" 审查", style="dim")
+    lines.append(sh_mode)
+    # 命令行（自然语言，强调 /help 查看所有命令）
+    sh_cmd = Text()
+    # sh_cmd.append("  命令: ", style="dim")
+    sh_cmd.append("  键入 ", style="dim")
+    sh_cmd.append("/help", style="bold")
+    sh_cmd.append(" 查看所有命令，", style="dim")
+    sh_cmd.append("/exit", style="bold")
+    sh_cmd.append(" 退出", style="dim")
+    lines.append(sh_cmd)
+
+    body = Group(*lines)
+    panel = Panel(
+        body,
+        border_style="cyan",
+        box=ROUNDED,
+        padding=(0, 1),
+        expand=False,
+    )
+    console.print(panel)
+
+    # 7. 会话信息（Panel 外：resumed / new 不同，放在 banner 下方）
+    if resumed:
+        meta = sm.get(sid) or {}
+        steps = meta.get("steps_total", 0)
+        tokens = meta.get("tokens_total", 0)
+        task_preview = (meta.get("task") or meta.get("summary") or "")[:80]
+
+        head = Text()
+        head.append("  ↻ ", style="bold green")
+        head.append(f"已恢复会话 ", style="")
+        head.append(sid[:12], style="bold yellow")
+        head.append("  ·  ", style="dim")
+        head.append(f"{steps} 步", style="")
+        head.append("  ·  ", style="dim")
+        head.append(f"{tokens:,} tokens", style="")
+        console.print(head)
+
+        if task_preview:
+            task_line = Text()
+            task_line.append("    ↳ 上次任务: ", style="dim")
+            task_line.append(task_preview, style="italic")
+            console.print(task_line)
+
+        # 渲染 todo 进度（如有）
+        todos = sm.get_todos(sid)
+        if todos:
+            todo_text = Text()
+            done_count = sum(1 for t in todos if t.get("status") == "completed")
+            total = len(todos)
+            todo_text.append(f"    📋 进度: {done_count}/{total} 项完成", style="cyan")
+            console.print(todo_text)
+            for t in todos[:5]:  # 最多显示 5 项
+                status = t.get("status", "pending")
+                icon = {"pending": "○", "in_progress": "◐",
+                        "completed": "●"}.get(status, "○")
+                color = {"pending": "dim", "in_progress": "yellow",
+                         "completed": "green"}.get(status, "dim")
+                line = Text()
+                line.append(f"      {icon} ", style=color)
+                line.append(t.get("content", "?"), style=color)
+                console.print(line)
+            if len(todos) > 5:
+                more = Text()
+                more.append(f"      ... 还有 {len(todos) - 5} 项", style="dim")
+                console.print(more)
+
+        tip_line = Text()
+        tip_line.append("    提示: ", style="cyan")
+        tip_line.append("直接键入任务继续，或 ", style="dim")
+        tip_line.append("/new", style="bold")
+        tip_line.append(" 开新会话", style="dim")
+        console.print(tip_line)
+    else:
+        head = Text()
+        head.append("  ✨ ", style="bold magenta")
+        head.append(f"新会话 ", style="")
+        head.append(sid[:12], style="bold yellow")
+        console.print(head)
+
+        tip_line = Text()
+        tip_line.append("    提示: ", style="cyan")
+        tip_line.append("键入任务开始，或 ", style="dim")
+        tip_line.append(":do", style="bold")
+        tip_line.append(" 切执行模式 / ", style="dim")
+        tip_line.append(":ask", style="bold")
+        tip_line.append(" 切只读模式", style="dim")
+        console.print(tip_line)
+    console.print()
+
+
+def _justify_row(left: Text, right: Text, width: int | None = None) -> Text:
+    """把 left 放左端、right 放右端，中间空格填满。
+    width=None 时用控制台宽度；传值按给定宽度（Panel 内比 console 窄 4 列）。"""
+    if width is None:
+        try:
+            width = _console.size.width
+        except (AttributeError, OSError):
+            width = 80
+    total = Text()
+    total.append(left)
+    gap = max(2, width - left.cell_len - right.cell_len)
+    total.append(" " * gap)
+    total.append(right)
+    return total
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    try:
+        run_frontend(args)
+    except KeyboardInterrupt:
+        pass  # REPL 内部已处理，这里忽略剩余的中断信号
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

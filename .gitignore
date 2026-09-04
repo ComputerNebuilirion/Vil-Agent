@@ -1,0 +1,6 @@
+.trae
+*.json
+__pycache__
+tests/
+pytest.ini
+session_*.md
