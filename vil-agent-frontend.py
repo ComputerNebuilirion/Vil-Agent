@@ -329,7 +329,7 @@ def repl_loop(model: AgentModel, view: TerminalView,
                       "review": "bold blue"}.get(default_mode, "bold green")
         prompt = (
             f"[bold cyan] Vil [/bold cyan]"
-            f"[bold yellow][{sid[:6]}][/bold yellow] "
+            f"[bold yellow]\\[{sid[:6]}][/bold yellow] "
             f"[{mode_style}]({default_mode})[/{mode_style}] "
             f"[bold bright_black]>[/bold bright_black] "
         )
