@@ -161,6 +161,16 @@ class TerminalView:
                 pass
             self._thinking_status = None
 
+    def stop_all(self) -> None:
+        """run 结束兜底清理：停 spinner + 关 Live。
+
+        无论正常 done / 异常 / 中断都必须把 UI 状态复位，
+        否则泄漏的 rich Status 渲染线程会让终端"卡在 thinking 状态"。
+        幂等：内部各方法都有 None 检查，可安全重复调用。
+        """
+        self._stop_thinking()
+        self._close_content(preserve=False)
+
     def _close_content(self, preserve: bool = True) -> None:
         """结束当前流式正文：停止 Live（保留渲染结果）并复位标志。
 

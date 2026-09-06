@@ -72,14 +72,28 @@ class State:
         return messages
 
     def all_messages(self, compress: bool = False,
-                     token_budget: int | None = None) -> list[dict]:
+                     token_budget: int | None = None,
+                     _apply_summary: bool = True) -> list[dict]:
         """加载消息，按需压缩或 token 预算截断。
 
         :param compress: 启用 L2 工具结果压缩（旧 tool result 替换占位符）
         :param token_budget: 若给定，超预算时用摘要替代最旧消息，
                              而非永久丢弃——保留长会话的决策上下文
+        :param _apply_summary: 是否用摘要缓存顶替最旧历史（仅供 prompt 视图；
+                             持久化/截断时传 False，避免合成的 system 摘要落盘）
         """
         messages = self.load()
+
+        # 有摘要缓存 → 用 [Earlier conversation summary] 顶替最旧 covered 条
+        # 让手动 /compress 生成的摘要在滑窗与预算两种模式都生效（运行时替换，
+        # 不影响 JSONL 原文）
+        if _apply_summary:
+            info = self.summary_meta()
+            if info:
+                covered = self._effective_covered(info, len(messages))
+                if covered > 0:
+                    messages = ([self._build_summary_message(info)]
+                                + messages[covered:])
 
         # token 预算模式：超预算时摘要旧消息
         if token_budget is not None:
@@ -102,6 +116,9 @@ class State:
 
         返回的列表**不含 system 前缀**（由调用方 loop.py 添加自己的 system
         prompt）。仅返回历史消息（含摘要 system 消息若有缓存）。
+
+        注意：摘要前缀由 all_messages(_apply_summary=True) 注入到 messages[0]
+        （role="system"），此处负责保留它，再对剩余历史按预算截尾。
         """
         if not messages:
             return []
@@ -109,12 +126,17 @@ class State:
         # 预算的 80% 给历史，20% 给 system prompt + 当前任务
         hist_budget = int(budget * 0.8)
 
-        # 从最新往回累加，确定保留范围
+        # 摘要 system 消息（若有）单独保留，不参与截断
+        summary_msg = None
+        if messages and messages[0].get("role") == "system":
+            summary_msg = messages[0]
+
+        # 从最新往回累加，确定保留范围（跳过中途 system）
         kept = []
         used = 0
         for msg in reversed(messages):
             if msg.get("role") == "system":
-                continue  # 跳过原 system，由 loop 加
+                continue  # 跳过 system，由 loop 加
             n = count_message_tokens(msg)
             if used + n > hist_budget and kept:
                 break
@@ -127,34 +149,59 @@ class State:
         while kept and kept[0].get("role") == "tool":
             kept = kept[1:]
 
-        # 加载摘要缓存（若 loop.py 已生成）
-        summary = self._load_summary()
         result = []
-        if summary:
-            result.append({
-                "role": "system",
-                "content": f"[Earlier conversation summary]\n{summary}",
-            })
+        if summary_msg:
+            result.append(summary_msg)
         result.extend(kept)
         return result
 
     def _load_summary(self) -> str | None:
-        """读取摘要缓存（由外部 summarize() 写入）"""
+        """读取摘要缓存文本（由外部 summarize() 写入）；无缓存返回 None"""
+        info = self.summary_meta()
+        return info.get("summary") if info else None
+
+    def summary_meta(self) -> dict | None:
+        """读取摘要缓存元数据：{"summary", "covered_count", "keep_recent"}"""
         p = self.path.with_suffix(".summary.json")
         if not p.exists():
             return None
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-            return data.get("summary")
-        except (json.JSONDecodeError, OSError):
+            if not data.get("summary"):
+                return None
+            return {
+                "summary": data["summary"],
+                "covered_count": int(data.get("covered_count") or 0),
+                # 旧格式无 keep_recent → 默认 10
+                "keep_recent": int(data.get("keep_recent") or 10),
+            }
+        except (json.JSONDecodeError, OSError, KeyError):
             return None
 
-    def _save_summary(self, summary: str, covered_count: int) -> None:
-        """保存摘要 + 已覆盖的消息数（供下次增量摘要）"""
+    def _save_summary(self, summary: str, covered_count: int,
+                      keep_recent: int = 10) -> None:
+        """保存摘要 + 已覆盖的消息数 + 尾部保留原文条数（供下次增量摘要）"""
         p = self.path.with_suffix(".summary.json")
-        data = {"summary": summary, "covered_count": covered_count}
+        data = {
+            "summary": summary,
+            "covered_count": covered_count,
+            "keep_recent": keep_recent,
+        }
         p.write_text(json.dumps(data, ensure_ascii=False, indent=2),
                      encoding="utf-8")
+
+    def _build_summary_message(self, info: dict) -> dict:
+        """把摘要缓存转成一条运行时 system 消息"""
+        return {
+            "role": "system",
+            "content": f"[Earlier conversation summary]\n{info['summary']}",
+        }
+
+    def _effective_covered(self, info: dict, total: int) -> int:
+        """摘要可顶替的消息数：不超过 covered_count，且不吞掉尾部
+        keep_recent 条原文（truncate 裁短文件后 covered 可能过期）"""
+        keep = info.get("keep_recent") or 10
+        return min(info.get("covered_count") or 0, max(0, total - keep))
 
     def get_messages_to_summarize(self, keep_recent: int = 10) -> list[dict]:
         """返回需要摘要的旧消息（全部 - 最近 keep_recent 条 - 首条 system）。
@@ -201,8 +248,12 @@ class State:
         return result
 
     def truncate(self) -> None:
-        """将文件截断为 max_length 条（仅条数模式用，token 预算模式不删原始消息）"""
-        messages = self.all_messages()
+        """将文件截断为 max_length 条（仅条数模式用，token 预算模式不删原始消息）
+
+        用 _apply_summary=False：合成的摘要 system 消息只活在运行时 prompt，
+        不写回 JSONL 历史文件。
+        """
+        messages = self.all_messages(_apply_summary=False)
         with open(self.path, "w", encoding="utf-8") as f:
             for msg in messages:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")

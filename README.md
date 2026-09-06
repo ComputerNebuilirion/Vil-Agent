@@ -185,6 +185,7 @@ Windows 没有 OS 级文件/网络沙箱（Claude Code 自己也没做），所�
 - `load()` 全量读取
 - `all_messages(compress=False)` 保留首条 + 最后 `max_length-1` 条。滑窗后若开头是孤立 tool（前面 `assistant with tool_calls` 被切掉），递归丢弃，避免触发 OpenAI API `"tool must be a response to a preceding message with 'tool_calls'"` 错误
 - `all_messages(compress=True)` 额外启用 **L2 工具结果压缩**：保留最近 `keep_recent=3` 个 `role="tool"` 消息全文，更早的 tool `content` 替换为 `[tool result cleared, was X chars, tool_call_id=...]` 占位符，防止旧 tool result 长期占用 token。**只在运行时压缩，不影响持久化文件**，`user`/`assistant` 消息不动
+- 摘要缓存（`{sid}.summary.json`，手动 `/compress` 或自动摘要写入）：`all_messages()` 有缓存时把最旧 `covered_count` 条历史替换为一条 `[Earlier conversation summary]` system 消息（仅运行时替换，不落盘；`truncate()` 用 `_apply_summary=False` 保证不把合成 system 写回 JSONL）。`covered_count` 被 `truncate` 裁短历史后自动收敛（`_effective_covered`），不会吞掉尾部保留的原文
 - `all_messages(token_budget=N)` 启用 **token 预算模式**：用 `tiktoken`（`cl100k_base` encoding）估算每条消息 token，从最新往回累加至预算 80%，超出部分不进 messages。配合摘要缓存：若有 `{sid}.summary.json` 则插入一条 `[Earlier conversation summary]` system 消息替代旧历史。**不删原始消息**，持久化文件保留全部历史
 - `truncate()` 落盘截断（仅条数模式用；token 预算模式不删原始消息）
 - `clear()` 清空（同时清理 `.summary.json` 缓存）
@@ -193,7 +194,7 @@ Windows 没有 OS 级文件/网络沙箱（Claude Code 自己也没做），所�
 
 默认 `max_length=30`（≈12 个 ReAct 步），平衡上下文保留和 token 控制。system 消息不写入 state，每次按当前 context 重建，避免上下文陈旧。
 
-`AgentLoop._build_messages` 在 `context_budget` 启用时走 `all_messages(compress=True, token_budget=N)`；否则走原条数滑窗。`run()` 开始时调 `_maybe_summarize()` 检查是否有足量旧消息值得摘要（至少 5 条），调一次 LLM 生成 ≤300 token 的摘要并缓存——花小钱省大钱（旧历史不再每轮重发）。摘要失败静默降级为占位符压缩。
+`AgentLoop._build_messages` 在 `context_budget` 启用时走 `all_messages(compress=True, token_budget=N)`；否则走原条数滑窗。两条路径都会读取摘要缓存，把旧历史替换为 `[Earlier conversation summary]` 摘要 system 消息（紧跟主 system 之后）。`run()` 开始时调 `_maybe_summarize()`：**仅在 `context_budget` 启用时自动触发**，检查是否有未被摘要覆盖的旧消息（至少 5 条新增），调一次 LLM 生成 ≤300 token 的摘要并缓存。`AgentLoop.summarize_history(force=)` 是自动/手动共用的摘要入口——前端 `/compress` 直接调它，即使 `context_budget` 未开也能让摘要生效。摘要失败静默降级为占位符压缩。
 
 ### TodoWrite 工具
 
@@ -251,6 +252,7 @@ sessions/
 | `/deleteall` | `delete_all()` + 必须新建一个 session（当前也已被删） |
 | `/clear` | `state.clear()` + 元数据 `tokens_total/steps_total/summary` 归零 |
 | `/sessions` `/tokens` `/history` | 列表 / 显示累计 / 显示最近消息（彩色角色区分：USER/ASSISTANT/TOOL/SYSTEM） |
+| `/compress [all]` | 手动摘要压缩：调 LLM 把当前会话旧历史压成摘要缓存（保留最近 10 条原文），`all` 忽略缓存强制重生成；无需 `context_budget` 即可生效 |
 | `/export [sid] [-o f]` | `export_markdown()` 导出为 .md（默认当前会话，支持 `-o` 指定路径） |
 | `/config` | 修改 `~/.vil/config.json`（详见下文「配置」） |
 

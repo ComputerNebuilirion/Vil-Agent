@@ -21,6 +21,7 @@ REPL 命令:
     /clear                清空当前会话历史
     /mode `ask/do/review` 查看/切换默认 mode
     /tokens               显示当前会话累计 token
+    /compress [all]       调 LLM 压缩当前会话旧历史（all=强制重生成，默认增量）
     /config [get|set|list|path] 配置管理（在 REPL 内修改 config.json）
 """
 import argparse
@@ -63,6 +64,8 @@ REPL 命令:
   /deleteall             永久删除所有会话（需确认）
   /mode \\[ask|do|review]  查看/切换默认 mode
   /tokens                显示当前会话累计 token
+  /compress \\[all]        调 LLM 压缩当前会话旧历史（all=强制重生成，
+                         默认只压缩新增部分，保留最近 10 条原文）
 配置命令:
   /config                列出所有配置（隐藏 api_key）
   /config get <key>      读取配置（dotted 路径，如 llm.endpoint）
@@ -367,6 +370,43 @@ def repl_loop(model: AgentModel, view: TerminalView,
         if line == "/tokens":
             _cmd_tokens(sm, sid)
             continue
+        if line == "/compress" or line.startswith("/compress "):
+            # 手动摘要压缩：调 LLM 把当前会话旧历史压成摘要缓存。
+            # 与自动 _maybe_summarize 共用 AgentLoop.summarize_history；
+            # 即使 context_budget 未开也能生效（state 滑窗路径读摘要缓存）。
+            parts = line.split()
+            force_all = len(parts) > 1 and parts[1] in ("all", "--all", "-a")
+            agent = model.build_agent(
+                mode="ask", trust=False, stream=False, max_steps=1,
+                permission_handler=None, state=state,
+                session_id=sid, session_manager=sm,
+            )
+            _console.print(f"{_tag('session')} 正在用 LLM 压缩当前会话历史…")
+            try:
+                model.ensure_loop()
+                res = asyncio.run(agent.summarize_history(force=force_all))
+            except KeyboardInterrupt:
+                _console.print(f"{_tag('interrupt')} 已取消压缩")
+                continue
+            except Exception as e:
+                _console.print(f"{_tag('error')} 压缩失败: {e}")
+                continue
+            if res is None:
+                _console.print(
+                    f"{_tag('session')} 没有足够的新增历史可压缩"
+                    f"（若想重生成摘要，请用 /compress all）"
+                )
+            else:
+                summary, covered = res
+                preview = " ".join(summary.split())
+                if len(preview) > 160:
+                    preview = preview[:160] + "…"
+                _console.print(
+                    f"{_tag('session')} 已压缩 {covered} 条旧消息为摘要"
+                    f"（保留最近 10 条原文），后续轮次将携带该摘要上下文"
+                )
+                _console.print(f"[dim]  摘要预览: {preview}[/dim]")
+            continue
         if line == "/clear":
             meta = sm.get(sid) or {}
             if not _confirm_dangerous(
@@ -590,7 +630,12 @@ def repl_loop(model: AgentModel, view: TerminalView,
             _console.print(f"{_tag('interrupt')} 用户中止，已返回提示符")
         except Exception as e:
             view._close_content(preserve=False)
+            view._stop_thinking()
             _console.print(f"{_tag('error')} {e}")
+        finally:
+            # 兜底：任何出口（done / 中断 / 异常 / 连按两次 Ctrl+C）都复位
+            # spinner + Live，防止 rich Status 渲染线程泄漏让终端卡住
+            view.stop_all()
 
 
 def run_frontend(args: argparse.Namespace) -> None:

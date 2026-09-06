@@ -284,8 +284,11 @@ class AgentLoop:
                 self.state.truncate()
                 await self._emit_stats(callback, step, t_start, usage_acc,
                                        status="interrupted")
-            except Exception:
-                pass  # 防止用户连按 Ctrl+C 时再次中断 stats 输出
+            except BaseException:
+                # 防用户连按 Ctrl+C：KeyboardInterrupt 继承自 BaseException，
+                # 若用 except Exception 会捕不住，导致第二次中断打断 stats
+                # 输出、异常穿透到前端 UI 状态不一致（spinner 泄漏）。
+                pass
             return "(user interrupted)"
 
     @staticmethod
@@ -314,34 +317,53 @@ class AgentLoop:
 
         # 加载历史。若启用 token 预算，走摘要压缩路径；否则用原条数滑窗。
         if self.context_budget is not None:
-            for msg in self.state.all_messages(
+            hist = self.state.all_messages(
                 compress=True, token_budget=self.context_budget
-            ):
-                if msg.get("role") != "system":
-                    messages.append(msg)
+            )
         else:
-            for msg in self.state.all_messages(compress=True):
-                if msg.get("role") != "system":
-                    messages.append(msg)
+            hist = self.state.all_messages(compress=True)
+
+        # 摘要 system 消息（[Earlier conversation summary]，由 state 注入）
+        # 要紧跟主 system 之后进入 prompt；其他意外 system 一律忽略。
+        summary_msg = None
+        for msg in hist:
+            if msg.get("role") == "system":
+                content = msg.get("content") or ""
+                if content.startswith("[Earlier conversation summary]") \
+                        and summary_msg is None:
+                    summary_msg = msg
+                continue
+            messages.append(msg)
+        if summary_msg is not None:
+            messages.insert(1, summary_msg)
 
         return messages
 
-    async def _maybe_summarize(self, callback) -> None:
-        """检查并生成旧消息摘要。
+    async def summarize_history(self, callback=None, force: bool = False):
+        """摘要压缩当前历史：把最旧一段（默认保留最近 10 条原文）调 LLM
+        压成摘要并缓存到 {sid}.summary.json。
 
-        触发条件：历史消息数 > keep_recent + 阈值，且有未被摘要覆盖的旧消息。
-        策略：取旧消息打包成文本，调 LLM 生成摘要，缓存到 .summary.json。
-        失败时静默降级（_build_messages 会回退到占位符压缩）。
+        自动触发（_maybe_summarize）与手动命令（前端 /compress）共用入口。
+        :param callback: 事件回调（"summary" 事件），可为 None
+        :param force: 忽略已有覆盖强制重新生成（/compress all）
+        :return: (summary, covered_count) | None（无可压缩内容或摘要失败）
         """
-        if self.context_budget is None:
-            return  # 未启用 token 预算模式
-
         KEEP_RECENT = 10
-        MIN_TO_SUMMARIZE = 5  # 至少 5 条旧消息才值得摘要
+        MIN_TO_SUMMARIZE = 5  # 至少 5 条新增历史才值得调一次 LLM
 
+        total = len(self.state.load())
+        info = self.state.summary_meta()
+        existing = info["covered_count"] if info else 0
+        target = max(0, total - KEEP_RECENT)  # 本次应覆盖到 target 条
+
+        # 已有覆盖已到最新边界 → 无新增可压缩内容，跳过（force 则重生成）
+        if not force and (target - existing) < MIN_TO_SUMMARIZE:
+            return None
+
+        # 待摘要的旧消息：整个待覆盖区间（含已覆盖部分，重生成保证连贯）
         old_msgs = self.state.get_messages_to_summarize(keep_recent=KEEP_RECENT)
         if len(old_msgs) < MIN_TO_SUMMARIZE:
-            return
+            return None
 
         # 打包旧消息为文本
         lines = []
@@ -377,16 +399,27 @@ class AgentLoop:
             )
             summary = (result.get("content") or "").strip()
             if summary:
-                covered = len(self.state.load()) - KEEP_RECENT
-                self.state._save_summary(summary, covered)
+                self.state._save_summary(summary, target, keep_recent=KEEP_RECENT)
                 await self._emit(callback, {
                     "event": "summary",
-                    "covered_count": covered,
+                    "covered_count": target,
                     "summary_tokens": len(summary) // 3,  # 粗估
                 })
+                return (summary, target)
         except Exception:
             # 摘要失败静默降级：_build_messages 会回退到占位符压缩
             pass
+        return None
+
+    async def _maybe_summarize(self, callback) -> None:
+        """自动摘要：仅在 token 预算模式启用；无新增可压缩消息时跳过。
+
+        失败时静默降级（_build_messages 会回退到占位符压缩）。
+        """
+        if self.context_budget is None:
+            return  # 未启用 token 预算模式
+
+        await self.summarize_history(callback=callback)
 
     def _load_system_prompt(self) -> str:
         """加载 system.txt 并注入 {{context}}，再按模式追加 mode 提示词"""
