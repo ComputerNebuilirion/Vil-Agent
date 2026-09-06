@@ -36,6 +36,7 @@ from VilAgent.agent_app import (
 )
 from rich.box import ROUNDED
 from rich.console import Group
+from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 from VilAgent.config import (
@@ -173,6 +174,7 @@ def _cmd_history(state: State, n: int = 20) -> None:
         # 截断过长内容
         if len(preview) > 200:
             preview = preview[:200] + "..."
+        preview = escape(preview)
         icon, style, label = role_styles.get(role, ("", "", role.upper()))
         # 多行内容用缩进对齐
         if "\n" in preview:
