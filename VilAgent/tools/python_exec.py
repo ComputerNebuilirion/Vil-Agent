@@ -5,7 +5,13 @@ from ..safety import classify, sandbox_run
 
 @tool(
     name="run_python",
-    description="在沙箱里执行 Python 代码（需 --trust；高危代码会被 L1 预检拦截）",
+    description=(
+        "在沙箱里执行 Python 代码（需 --trust；高危代码会被 L1 预检拦截）。"
+        "注意：脚本运行在系统临时目录（Windows 通常在 C 盘）里的独立沙箱中，"
+        "cwd 不是工作区，且环境变量已清理；因此不能用相对路径访问工作区文件。"
+        "需要读工作区数据时，请先用 read_file/search_code 取出内容，"
+        "再在代码里内联传入或使用绝对路径。"
+    ),
     parameters={
         "type": "object",
         "properties": {

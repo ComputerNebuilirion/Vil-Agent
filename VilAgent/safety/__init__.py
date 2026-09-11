@@ -1,5 +1,5 @@
 from .ast_check import check_safety, classify, is_valid_python, contains_unsafe_patterns
-from .sandbox import sandbox_run
+from .sandbox import sandbox_run, clean_stale_sandboxes
 from .permissions import PermissionSystem, Rule, ALLOW, ASK, DENY
 from pathlib import Path
 
@@ -26,6 +26,7 @@ __all__ = [
     "is_valid_python",
     "contains_unsafe_patterns",
     "sandbox_run",
+    "clean_stale_sandboxes",
     "is_path_safe",
     "PermissionSystem",
     "Rule",

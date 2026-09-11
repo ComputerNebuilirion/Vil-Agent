@@ -169,6 +169,7 @@ Windows 没有 OS 级文件/网络沙箱（Claude Code 自己也没做），所�
   规则文件 `.vil/permissions.json`：`{"rules":[{"tool":"write_file","pattern":"src/**","action":"allow"}]}`，fnmatch 匹配 `args["path"]` 或 `args["command"]`。
   `action="ask"` 时调用 `permission_handler`（由调用方提供，如 CLI 交互输入）。
 - **L3 `sandbox_run(code, timeout, mem_mb, cwd)`** → Windows Job Object 限制内存/CPU/UI，环境清理剥离 API key/secret，超时用 `TerminateJobObject` 杀整个 Job（含后代）。
+  默认在系统临时目录建 `sandbox_*` 目录隔离执行，**用后自动清理**（超时/异常路径也会删）；`clean_stale_sandboxes()` 清扫异常退出残留的旧目录。
   非 Windows / 无 pywin32 退化为 `subprocess + timeout`（best-effort）。
   Linux/macOS 的 bubblewrap / sandbox-exec 路径 **TODO**（等平台条件）。
 - **路径**：`is_path_safe(path, workspace)` 防止 `..` 越界。

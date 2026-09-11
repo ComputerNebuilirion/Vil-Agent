@@ -7,9 +7,11 @@ Windows + pywin32: Job Object 限制 内存/CPU，环境清理剥离敏感变量
 Linux/macOS: TODO（等有平台条件再补 bubblewrap / sandbox-exec 路径）。
 """
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 from .ast_check import check_safety
@@ -39,19 +41,63 @@ def sandbox_run(code: str,
 
     :return: (exit_code, 合并后的 stdout/stderr)
     """
-    if cwd is None:
+    owned_cwd = cwd is None
+    if owned_cwd:
         cwd = tempfile.mkdtemp(prefix="sandbox_")
 
     # L1 预检：高危代码不进沙箱（ctypes/exec/eval 能逃逸 Job Object）
     is_safe, msg = check_safety(code)
     if not is_safe:
+        if owned_cwd:
+            _rmtree(cwd)
         return -1, f"安全检查失败: {msg}"
 
     env = _clean_env()
 
-    if _HAS_WIN32:
-        return _run_with_job_object(code, timeout, mem_mb, cwd, env)
-    return _run_fallback(code, timeout, cwd, env)
+    try:
+        if _HAS_WIN32:
+            return _run_with_job_object(code, timeout, mem_mb, cwd, env)
+        return _run_fallback(code, timeout, cwd, env)
+    finally:
+        # 用后清理：只删自己 mkdtemp 出来的目录，不动调用方传入的 cwd
+        if owned_cwd:
+            _rmtree(cwd)
+
+
+def _rmtree(path: str, attempts: int = 3) -> None:
+    """删除目录树（Windows 上文件可能被短暂占用，重试几次）；失败不抛异常"""
+    for i in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            if i < attempts - 1:
+                time.sleep(0.1 * (i + 1))
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def clean_stale_sandboxes() -> int:
+    """
+    清扫临时目录里历史遗留的 sandbox_* 目录（进程异常退出时会残留）
+
+    仅删除本模块命名约定（sandbox_ 前缀）的目录，返回删除数量。
+    """
+    root = tempfile.gettempdir()
+    removed = 0
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return 0
+    for name in names:
+        if not name.startswith("sandbox_"):
+            continue
+        full = os.path.join(root, name)
+        if os.path.isdir(full):
+            _rmtree(full)
+            removed += 1
+    return removed
 
 
 def _clean_env(env: dict | None = None) -> dict:

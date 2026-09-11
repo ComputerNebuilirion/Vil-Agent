@@ -25,6 +25,7 @@ from .config import load_config, set_value, get_value, CONFIG_FILE
 from .context import Context
 from .llm import LLMClient
 from .loop import AgentLoop
+from .safety import clean_stale_sandboxes
 from .session import SessionManager
 from .state import State
 
@@ -60,6 +61,11 @@ class AgentModel:
             retry_base_delay=llm_cfg.get("retry_base_delay", 0.5),
         )
         self.ctx = Context(workspace=Path.cwd())
+        # 启动时清扫历史遗留的沙箱临时目录（异常退出会残留，best-effort）
+        try:
+            clean_stale_sandboxes()
+        except Exception:
+            pass
         # 跟踪 httpx client 所属的事件循环，跨 asyncio.run() 时重建 client
         self._client_loop: asyncio.AbstractEventLoop | None = None
 
