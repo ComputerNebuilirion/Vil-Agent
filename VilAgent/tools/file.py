@@ -5,18 +5,22 @@ import subprocess
 from pathlib import Path
 
 from . import tool
+from ..i18n import L
 from ..safety import is_path_safe
 
 
 @tool(
     name="read_file",
-    description="读取文件内容，支持指定起始行和行数限制",
+    description=L(
+        "读取文件内容，支持指定起始行和行数限制",
+        "Read file contents, with optional start line and line-count limit",
+    ),
     parameters={
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "文件路径（相对于工作区）"},
-            "offset": {"type": "integer", "description": "起始行号（0-based）", "default": 0},
-            "limit": {"type": "integer", "description": "读取行数（0=全部）", "default": 50},
+            "path": {"type": "string", "description": L("文件路径（相对于工作区）", "File path (relative to workspace)")},
+            "offset": {"type": "integer", "description": L("起始行号（0-based）", "Start line (0-based)"), "default": 0},
+            "limit": {"type": "integer", "description": L("读取行数（0=全部）", "Number of lines to read (0=all)"), "default": 50},
         },
         "required": ["path"],
     },
@@ -45,13 +49,13 @@ def read_file(path: str, offset: int = 0, limit: int = 50, _ctx=None) -> str:
 
 @tool(
     name="write_file",
-    description="写入或覆盖文件内容（需要 --trust）",
+    description=L("写入或覆盖文件内容（需要 --trust）", "Write or overwrite file contents (requires --trust)"),
     parameters={
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "文件路径（相对于工作区）"},
-            "content": {"type": "string", "description": "要写入的内容"},
-            "append": {"type": "boolean", "description": "是否追加而非覆盖", "default": False},
+            "path": {"type": "string", "description": L("文件路径（相对于工作区）", "File path (relative to workspace)")},
+            "content": {"type": "string", "description": L("要写入的内容", "Content to write")},
+            "append": {"type": "boolean", "description": L("是否追加而非覆盖", "Append instead of overwrite"), "default": False},
         },
         "required": ["path", "content"],
     },
@@ -83,11 +87,11 @@ def write_file(path: str, content: str, append: bool = False, _ctx=None) -> str:
 
 @tool(
     name="delete_file",
-    description="删除文件（破坏性操作，需 trust，会交互确认）",
+    description=L("删除文件（破坏性操作，需 trust，会交互确认）", "Delete a file (destructive; needs trust, asks for confirmation)"),
     parameters={
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "文件路径（相对于工作区）"},
+            "path": {"type": "string", "description": L("文件路径（相对于工作区）", "File path (relative to workspace)")},
         },
         "required": ["path"],
     },
@@ -170,12 +174,12 @@ def _is_protected_delete(path: str) -> bool:
 
 @tool(
     name="search_code",
-    description="在代码中搜索文本，返回匹配的行和行号",
+    description=L("在代码中搜索文本，返回匹配的行和行号", "Search text in code, returning matching lines and line numbers"),
     parameters={
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "搜索关键词"},
-            "glob": {"type": "string", "description": "文件 glob 模式", "default": "**/*"},
+            "query": {"type": "string", "description": L("搜索关键词", "Search keyword")},
+            "glob": {"type": "string", "description": L("文件 glob 模式", "File glob pattern"), "default": "**/*"},
         },
         "required": ["query"],
     },
@@ -229,11 +233,11 @@ def search_code(query: str, glob: str = "**/*", _ctx=None) -> str:
 
 @tool(
     name="list_dir",
-    description="列出目录内容",
+    description=L("列出目录内容", "List directory contents"),
     parameters={
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "目录路径（相对于工作区）", "default": "."},
+            "path": {"type": "string", "description": L("目录路径（相对于工作区）", "Directory path (relative to workspace)"), "default": "."},
         },
         "required": [],
     },

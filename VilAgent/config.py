@@ -22,6 +22,8 @@ DEFAULTS: dict = {
     "stream": True,
     "default_mode": "ask",
     "max_steps": 50,
+    # 输出语言：cn（中文）/ en（英文）；见 VilAgent/i18n.py
+    "lang": "cn",
 }
 
 

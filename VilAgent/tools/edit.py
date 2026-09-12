@@ -2,19 +2,23 @@
 from pathlib import Path
 
 from . import tool
+from ..i18n import L
 from ..safety import is_path_safe
 
 
 @tool(
     name="edit_file",
-    description="局部修改文件内容：用 old_text 匹配替换为 new_text，比 write_file 整篇覆盖更省 token",
+    description=L(
+        "局部修改文件内容：用 old_text 匹配替换为 new_text，比 write_file 整篇覆盖更省 token",
+        "Edit part of a file by replacing old_text with new_text; cheaper than a full write_file overwrite",
+    ),
     parameters={
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "文件路径（相对于工作区）"},
-            "old_text": {"type": "string", "description": "要被替换的原始文本（精确匹配，含换行）"},
-            "new_text": {"type": "string", "description": "替换后的新文本"},
-            "replace_all": {"type": "boolean", "description": "是否替换所有匹配（默认 False，只替换第一个）", "default": False},
+            "path": {"type": "string", "description": L("文件路径（相对于工作区）", "File path (relative to workspace)")},
+            "old_text": {"type": "string", "description": L("要被替换的原始文本（精确匹配，含换行）", "Original text to replace (exact match, including newlines)")},
+            "new_text": {"type": "string", "description": L("替换后的新文本", "Replacement text")},
+            "replace_all": {"type": "boolean", "description": L("是否替换所有匹配（默认 False，只替换第一个）", "Replace all matches (default False: only the first)"), "default": False},
         },
         "required": ["path", "old_text", "new_text"],
     },

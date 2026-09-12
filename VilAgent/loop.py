@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from .context import Context
+from .i18n import t, get_lang
 from .llm import LLMClient, LLMError
 from .safety import classify
 from .safety.permissions import PermissionSystem, ALLOW, ASK, DENY
@@ -269,7 +270,8 @@ class AgentLoop:
             await self._emit_stats(callback, self.max_steps, t_start, usage_acc,
                                    status="max_steps")
             # 标记 <new_task/> 让前端提示用户 /new 切换 session
-            return f"(已达最大步数 {self.max_steps}，建议 /new 切换会话)<new_task/>"
+            return t(f"(已达最大步数 {self.max_steps}，建议 /new 切换会话)<new_task/>",
+                     f"(reached max steps {self.max_steps}, consider /new to switch session)<new_task/>")
 
         except KeyboardInterrupt:
             # 用户 Ctrl+C 中止：已写入的历史保留（jsonl append 模式），
@@ -279,7 +281,7 @@ class AgentLoop:
                     "event": "interrupted",
                     "reason": "user",
                     "step": step,
-                    "message": "用户中止",
+                    "message": t("用户中止", "user interrupted"),
                 })
                 self.state.truncate()
                 await self._emit_stats(callback, step, t_start, usage_acc,
@@ -423,7 +425,11 @@ class AgentLoop:
 
     def _load_system_prompt(self) -> str:
         """加载 system.txt 并注入 {{context}}，再按模式追加 mode 提示词"""
-        base_path = PROMPTS_DIR / "system.txt"
+        # 语言子目录：en 走 prompts/en/；缺失文件回退到根 prompts/
+        prompt_dir = PROMPTS_DIR / "en" if get_lang() == "en" else PROMPTS_DIR
+        base_path = prompt_dir / "system.txt"
+        if not base_path.exists():
+            base_path = PROMPTS_DIR / "system.txt"
         if not base_path.exists():
             base = "You are a code agent with tools. Context:\n{{context}}"
         else:
@@ -434,7 +440,9 @@ class AgentLoop:
 
         mode_name = _MODE_PROMPT.get(self.mode)
         if mode_name:
-            mode_path = PROMPTS_DIR / f"{mode_name}.txt"
+            mode_path = prompt_dir / f"{mode_name}.txt"
+            if not mode_path.exists():
+                mode_path = PROMPTS_DIR / f"{mode_name}.txt"
             if mode_path.exists():
                 prompt += "\n\n" + mode_path.read_text(encoding="utf-8")
 
@@ -442,16 +450,19 @@ class AgentLoop:
         if self.session_manager and self.session_id:
             todos = self.session_manager.get_todos(self.session_id)
             if todos:
-                todo_lines = ["\n## 当前任务进度（由 todo_write 工具规划）"]
-                for t in todos:
+                todo_lines = [t("\n## 当前任务进度（由 todo_write 工具规划）",
+                                "\n## Current task progress (planned via todo_write tool)")]
+                for _item in todos:
                     icon = {"pending": "○", "in_progress": "◐",
-                            "completed": "●"}.get(t.get("status", ""), "○")
+                            "completed": "●"}.get(_item.get("status", ""), "○")
                     todo_lines.append(
-                        f"{icon} [{t.get('status', '?')}] {t.get('content', '')}"
+                        f"{icon} [{_item.get('status', '?')}] {_item.get('content', '')}"
                     )
                 todo_lines.append(
-                    "使用 todo_write 工具更新进度（传完整列表替换）。"
-                    "完成某项时标记为 completed。"
+                    t("使用 todo_write 工具更新进度（传完整列表替换）。"
+                      "完成某项时标记为 completed。",
+                      "Use the todo_write tool to update progress (pass the full list to replace). "
+                      "Mark an item as completed when done.")
                 )
                 prompt += "\n" + "\n".join(todo_lines)
 

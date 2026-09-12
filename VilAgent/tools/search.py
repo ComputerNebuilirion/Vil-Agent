@@ -3,18 +3,20 @@ import os
 from pathlib import Path
 
 from . import tool
+from ..i18n import L
 from ..safety import is_path_safe
 
 
 @tool(
     name="grep_file",
-    description="在指定文件或目录中搜索关键词，返回匹配行（只读，不修改任何文件）",
+    description=L("在指定文件或目录中搜索关键词，返回匹配行（只读，不修改任何文件）",
+                 "Search for a keyword in a file or directory, returning matching lines (read-only)"),
     parameters={
         "type": "object",
         "properties": {
-            "pattern": {"type": "string", "description": "搜索关键词（支持简单字符串，不需要正则）"},
-            "path": {"type": "string", "description": "文件或目录路径（相对于工作区），目录会递归搜索"},
-            "max_results": {"type": "integer", "description": "最多返回多少条匹配，默认 30", "default": 30},
+            "pattern": {"type": "string", "description": L("搜索关键词（支持简单字符串，不需要正则）", "Keyword to search (plain string, no regex needed)")},
+            "path": {"type": "string", "description": L("文件或目录路径（相对于工作区），目录会递归搜索", "File or directory path (relative to workspace); directories are searched recursively")},
+            "max_results": {"type": "integer", "description": L("最多返回多少条匹配，默认 30", "Max matches to return (default 30)"), "default": 30},
         },
         "required": ["pattern", "path"],
     },

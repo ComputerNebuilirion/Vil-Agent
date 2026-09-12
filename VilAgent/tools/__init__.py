@@ -2,6 +2,8 @@
 import json
 from typing import Callable
 
+from ..i18n import resolve as _resolve_i18n
+
 _REGISTRY: dict[str, dict] = {}
 
 
@@ -27,9 +29,9 @@ def tool(name: str, description: str, parameters: dict,
 
 
 def get_tool_schemas(readonly_only: bool = False) -> list[dict]:
-    """返回 OpenAI tool 格式的 schema 列表"""
+    """返回 OpenAI tool 格式的 schema 列表（description/参数描述按当前语言解析）"""
     return [
-        v["schema"] for v in _REGISTRY.values()
+        _resolve_i18n(v["schema"]) for v in _REGISTRY.values()
         if not readonly_only or v["readonly"]
     ]
 

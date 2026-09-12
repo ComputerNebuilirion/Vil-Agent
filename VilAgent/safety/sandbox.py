@@ -15,6 +15,7 @@ import time
 import uuid
 
 from .ast_check import check_safety
+from ..i18n import t
 
 # Windows pywin32 检测
 if sys.platform == "win32":
@@ -50,7 +51,7 @@ def sandbox_run(code: str,
     if not is_safe:
         if owned_cwd:
             _rmtree(cwd)
-        return -1, f"安全检查失败: {msg}"
+        return -1, t(f"安全检查失败: {msg}", f"safety check failed: {msg}")
 
     env = _clean_env()
 

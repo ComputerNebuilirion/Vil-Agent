@@ -23,6 +23,7 @@ from rich.text import Text
 
 from .config import load_config, set_value, get_value, CONFIG_FILE
 from .context import Context
+from .i18n import set_lang, t
 from .llm import LLMClient
 from .loop import AgentLoop
 from .safety import clean_stale_sandboxes
@@ -43,14 +44,21 @@ class AgentModel:
 
     def __init__(self):
         cfg = load_config()
+        # 按配置切换输出语言（cn/en），影响 t()/L() 取值；未知值回退 cn
+        set_lang(cfg.get("lang"))
         llm_cfg = cfg.get("llm") or {}
         if not llm_cfg.get("endpoint") or not llm_cfg.get("model"):
-            raise SystemExit(
+            raise SystemExit(t(
                 "未配置 LLM，先设置：\n"
                 "  from VilAgent import set_value\n"
                 "  set_value('llm.endpoint', '<URL>')\n"
                 "  set_value('llm.model', '<模型名>')\n"
-                "或编辑 ~/.vil/config.json")
+                "或编辑 ~/.vil/config.json",
+                "LLM not configured. Set it first:\n"
+                "  from VilAgent import set_value\n"
+                "  set_value('llm.endpoint', '<URL>')\n"
+                "  set_value('llm.model', '<model>')"
+                "\nor edit ~/.vil/config.json"))
         self.cfg = cfg
         self.llm = LLMClient(
             endpoint=llm_cfg["endpoint"],
@@ -243,17 +251,17 @@ class TerminalView:
             line.append("⏺ ", style="bold yellow")
             line.append("todo_write", style="bold yellow")
             todos = args["todos"]
-            line.append(f"({len(todos)} 项)")
+            line.append(t(f"({len(todos)} 项)", f"({len(todos)} items)"))
             console.print(line)
-            for t in todos:
-                status = t.get("status", "pending")
+            for _item in todos:
+                status = _item.get("status", "pending")
                 icon = {"pending": "○", "in_progress": "◐",
                         "completed": "●"}.get(status, "○")
                 color = {"pending": "dim", "in_progress": "yellow",
                          "completed": "green"}.get(status, "dim")
                 tline = Text()
                 tline.append(f"  {icon} ", style=color)
-                tline.append(t.get("content", "?"), style=color)
+                tline.append(_item.get("content", "?"), style=color)
                 console.print(tline)
             return
 
@@ -344,12 +352,14 @@ class TerminalView:
         status_tag = "" if status == "done" else f" [{status}]"
         prefix = f"{symbol}{status_tag}" if symbol or status_tag else ""
         console.print(
-            f"[{style}]{prefix}[/{style}] [dim]{e['steps']} 步 · "
-            f"{e['elapsed_s']}s [/dim] "
+            f"[{style}]{prefix}[/{style}] "
+            + t(f"[dim]{e['steps']} 步 · ", f"[dim]{e['steps']} steps · ")
+            + f"{e['elapsed_s']}s [/dim] "
             f"[cyan]↑{u['prompt_tokens']} tokens[/cyan] "
             f"[magenta]↓{u['completion_tokens']} tokens[/magenta] "
-            f"[dim](推理 {u['reasoning_tokens']} tokens)[/dim] "
-            f"[bold]Σ {u['total_tokens']} tokens[/bold]"
+            + t(f"[dim](推理 {u['reasoning_tokens']} tokens)[/dim] ",
+                f"[dim](reasoning {u['reasoning_tokens']} tokens)[/dim] ")
+            + f"[bold]Σ {u['total_tokens']} tokens[/bold]"
         )
 
     async def _on_error(self, e):
@@ -362,20 +372,21 @@ class TerminalView:
     async def _on_max_steps(self, e):
         self._close_content()
         err_console.print(
-            f"[yellow]⚠ 已达最大步数 ({e['max_steps']})[/yellow]"
+            f"[yellow]⚠ {t('已达最大步数', 'reached max steps')} ({e['max_steps']})[/yellow]"
         )
 
     async def _on_loop_detected(self, e):
         self._close_content()
         err_console.print(
-            f"[yellow]⚠ 检测到循环 (step {e['step']} 重复签名)[/yellow]\n"
+            f"[yellow]⚠ {t('检测到循环', 'loop detected')} (step {e['step']} "
+            + t("重复签名", "repeated signature") + ")[/yellow]\n"
             f"[dim]  pattern: {e['pattern']}[/dim]"
         )
 
     async def _on_interrupted(self, e):
         self._close_content(preserve=False)
         err_console.print(
-            f"[yellow]⚠ 用户中止 (step {e['step']})[/yellow]"
+            f"[yellow]⚠ {t('用户中止', 'user interrupted')} (step {e['step']})[/yellow]"
         )
 
     # —— 权限交互（agent 调用此 handler 拿 allow/deny）——
@@ -384,18 +395,18 @@ class TerminalView:
         args = req["args"]
         risk = req.get("risk")
         body = Text()
-        body.append("请求执行 ", style="dim")
+        body.append(t("请求执行 ", "Request to run "), style="dim")
         body.append(tool, style="bold")
         if risk:
-            body.append(f"\n风险评级: {risk}", style="yellow")
+            body.append(t(f"\n风险评级: {risk}", f"\nrisk level: {risk}"), style="yellow")
         for k, v in args.items():
             s = str(v)
             preview = s[:120] + ("…" if len(s) > 120 else "")
             body.append(f"\n  {k}: ", style="dim")
             body.append(preview)
         console.print(Panel(body, border_style="yellow",
-                           title="权限请求", title_align="left"))
-        console.print(Text("  允许执行? [y/N] > ", style="bold"), end="")
+                           title=t("权限请求", "permission request"), title_align="left"))
+        console.print(Text(t("  允许执行? [y/N] > ", "  Allow? [y/N] > "), style="bold"), end="")
         try:
             ans = await asyncio.to_thread(input)
         except (EOFError, KeyboardInterrupt):

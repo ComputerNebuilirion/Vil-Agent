@@ -43,11 +43,17 @@ from rich.text import Text
 from VilAgent.config import (
     CONFIG_FILE, load_config, set_value, get_value,
 )
+from VilAgent.i18n import t, set_lang, get_lang
 
 # 写类模式：trust=True
 _WRITE_MODES = {"do"}
 
-_HELP = """\
+def _help_text() -> str:
+    """按当前语言返回 REPL 帮助文本。"""
+    return _EN_HELP if get_lang() == "en" else _CN_HELP
+
+
+_CN_HELP = """\
 REPL 命令:
   :ask <task>            只读分析/规划
   :do <task>             执行（允许写操作）
@@ -71,25 +77,61 @@ REPL 命令:
   /config get <key>      读取配置（dotted 路径，如 llm.endpoint）
   /config set <key> <v>  设置配置（自动 JSON parse，true/false/数字/null）
   /config path           显示 config.json 路径
-  /help                   本帮助
-  /exit                   退出
+  /help                  本帮助
+  /exit                  退出
 当 agent 检测到当前输入跟前面任务明显不相关时，会自动提示 /new 切换。
+"""
+
+_EN_HELP = """\
+REPL commands:
+  :ask <task>            read-only analysis / planning
+  :do <task>             execute (write ops allowed)
+  :review <task>         code review
+  <no prefix>            run with the default mode
+Session commands:
+  /new                   start a new session (keeps the old one; /switch to revisit)
+  /sessions              list all sessions
+  /switch <id>           switch to the given session
+  /history               show recent messages of the current session
+  /export \\[sid] [-o f]   export session to Markdown (current by default)
+  /clear                 clear current session history (confirmation required)
+  /delete <id>           permanently delete a session (confirm; current by default)
+  /deleteall             permanently delete all sessions (confirmation required)
+  /mode \\[ask|do|review]  view / switch the default mode
+  /tokens                show cumulative tokens of the current session
+  /compress \\[all]         LLM-compress old history of the current session (all=force
+                         regenerate; default compresses only new parts, keeps last 10)
+Config commands:
+  /config                list all config (api_key hidden)
+  /config get <key>      read a config value (dotted path, e.g. llm.endpoint)
+  /config set <key> <v>  set a config value (auto JSON parse: true/false/number/null)
+  /config path           show the config.json path
+  /help                  this help
+  /exit                  quit
+When the agent detects the current input is clearly unrelated to the previous task,
+it will prompt you to /new switch.
 """
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="vil-agent-frontend",
-        description="Vil Agent HCI Frontend - Vil Agent 交互式前端（多轮 REPL）",
+        description=t("Vil Agent HCI Frontend - Vil Agent 交互式前端（多轮 REPL）",
+                      "Vil Agent HCI Frontend - Vil Agent interactive frontend (multi-turn REPL)"),
     )
     p.add_argument("--continue", dest="continue_session", metavar="SESSION",
-                   help="续接指定会话 ID（'last' 表示最近一次）")
+                   help=t("续接指定会话 ID（'last' 表示最近一次）",
+                          "Resume the given session ID ('last' = the most recent one)"))
     p.add_argument("--new", action="store_true",
-                   help="强制新建 session（默认行为是续接上次会话）")
+                   help=t("强制新建 session（默认行为是续接上次会话）",
+                          "Force a new session (default is to resume the last one)"))
     p.add_argument("--mode", default="ask", choices=["ask", "do", "review"],
-                   help="默认模式（用户输入不带 mode 前缀时用）")
-    p.add_argument("--max-steps", type=int, default=None, help="最大步数（默认 50）")
-    p.add_argument("--no-stream", action="store_true", help="关闭流式输出")
+                   help=t("默认模式（用户输入不带 mode 前缀时用）",
+                          "Default mode (used when input has no mode prefix)"))
+    p.add_argument("--max-steps", type=int, default=None,
+                   help=t("最大步数（默认 50）", "Max steps (default 50)"))
+    p.add_argument("--no-stream", action="store_true",
+                   help=t("关闭流式输出", "Disable streaming output"))
     return p
 
 
@@ -116,7 +158,7 @@ def _tag(tag: str) -> str:
 def _cmd_sessions(sm: SessionManager) -> None:
     items = sm.list_all()
     if not items:
-        _console.print(f"{_tag('history')} (空)")
+        _console.print(t(f"{_tag('history')} (空)", f"{_tag('history')} (empty)"))
         return
     _console.print(f"{'ID':<14} {'MODE':<8} {'STEPS':<6} {'TOKENS':<8} "
                    f"{'UPDATED':<17} {'TASK'}")
@@ -129,14 +171,16 @@ def _cmd_sessions(sm: SessionManager) -> None:
                        f"{it.get('steps_total',0):<6} "
                        f"{it.get('tokens_total',0):<8} "
                        f"{updated:<17} {task}")
-    _console.print(f"{_tag('history')} 共 {len(items)} 个会话，显示最近 "
-                   f"{min(20, len(items))} 个")
+    _console.print(t(f"{_tag('history')} 共 {len(items)} 个会话，显示最近 "
+                     f"{min(20, len(items))} 个",
+                     f"{_tag('history')} {len(items)} sessions, showing latest "
+                     f"{min(20, len(items))}"))
 
 
 def _cmd_history(state: State, n: int = 20) -> None:
     msgs = state.load()
     if not msgs:
-        _console.print(f"{_tag('history')} (空)")
+        _console.print(t(f"{_tag('history')} (空)", f"{_tag('history')} (empty)"))
         return
     # 角色样式表：前缀符号 + 颜色 + 标签（无 emoji）
     role_styles = {
@@ -185,8 +229,10 @@ def _cmd_history(state: State, n: int = 20) -> None:
             _console.print(f"[{style}]{icon}{label}[/]\n    [dim]{indented}[/]")
         else:
             _console.print(f"[{style}]{icon}{label}[/] [dim]{preview}[/]")
-    _console.print(f"{_tag('history')} 共 {len(msgs)} 条，显示最近 "
-                   f"{min(n, len(msgs))} 条")
+    _console.print(t(f"{_tag('history')} 共 {len(msgs)} 条，显示最近 "
+                     f"{min(n, len(msgs))} 条",
+                     f"{_tag('history')} {len(msgs)} messages, showing latest "
+                     f"{min(n, len(msgs))}"))
 
 
 def _cmd_tokens(sm: SessionManager, sid: str) -> None:
@@ -221,26 +267,30 @@ def _cmd_export(line: str, sm: SessionManager, current_sid: str) -> None:
         if len(matches) == 1:
             target_sid = matches[0]
         elif not matches:
-            _console.print(f"{_tag('error')} 找不到会话 {target_sid}")
+            _console.print(t(f"{_tag('error')} 找不到会话 {target_sid}", f"{_tag('error')} session not found: {target_sid}"))
             return
         else:
             _console.print(
-                f"{_tag('error')} 匹配多个会话: "
-                f"{' '.join(m[:6] for m in matches)}，请输更长的前缀"
+                t(f"{_tag('error')} 匹配多个会话: "
+                  f"{' '.join(m[:6] for m in matches)}，请输更长的前缀",
+                  f"{_tag('error')} matches multiple sessions: "
+                  f"{' '.join(m[:6] for m in matches)}, please type a longer prefix")
             )
             return
 
     state = State(sm.path_for(target_sid))
     msgs = state.load()
     if not msgs:
-        _console.print(f"{_tag('error')} 会话 {target_sid[:6]} 无消息可导出")
+        _console.print(t(f"{_tag('error')} 会话 {target_sid[:6]} 无消息可导出",
+                         f"{_tag('error')} session {target_sid[:6]} has no messages to export"))
         return
 
     md = sm.export_markdown(target_sid, msgs)
     if out_path is None:
         out_path = f"session_{target_sid}.md"
     Path(out_path).write_text(md, encoding="utf-8")
-    _console.print(f"{_tag('session')} 已导出 {target_sid[:6]} → {out_path}（{len(msgs)} 条消息）")
+    _console.print(t(f"{_tag('session')} 已导出 {target_sid[:6]} → {out_path}（{len(msgs)} 条消息）",
+                     f"{_tag('session')} exported {target_sid[:6]} → {out_path} ({len(msgs)} messages)"))
 
 
 def _cmd_config(line: str) -> None:
@@ -255,21 +305,25 @@ def _cmd_config(line: str) -> None:
 
     if sub == "get":
         if len(parts) < 3:
-            _console.print(f"{_tag('config')} 用法: /config get <key>（如 llm.endpoint）")
+            _console.print(t(f"{_tag('config')} 用法: /config get <key>（如 llm.endpoint）",
+                             f"{_tag('config')} usage: /config get <key> (e.g. llm.endpoint)"))
             return
         key = parts[2]
         val = get_value(key)
         if val is None and key != "llm.api_key":
-            _console.print(f"{_tag('config')} {key} 未设置")
+            _console.print(t(f"{_tag('config')} {key} 未设置",
+                             f"{_tag('config')} {key} is not set"))
         elif key == "llm.api_key":
-            _console.print(f"{_tag('config')} {key} = (hidden, 长度 {len(str(val or ''))})")
+            _console.print(t(f"{_tag('config')} {key} = (hidden, 长度 {len(str(val or ''))})",
+                             f"{_tag('config')} {key} = (hidden, length {len(str(val or ''))})"))
         else:
             _console.print(f"{_tag('config')} {key} = {val!r}")
         return
 
     if sub == "set":
         if len(parts) < 4:
-            _console.print(f"{_tag('config')} 用法: /config set <key> <value>")
+            _console.print(t(f"{_tag('config')} 用法: /config set <key> <value>",
+                             f"{_tag('config')} usage: /config set <key> <value>"))
             return
         key, raw = parts[2], parts[3]
         # 自动 JSON parse：true/false/数字/null/对象/数组
@@ -278,12 +332,15 @@ def _cmd_config(line: str) -> None:
         except json.JSONDecodeError:
             val = raw  # 当字符串
         set_value(key, val)
-        _console.print(f"{_tag('config')} 已设置 {key} = {val!r}")
+        _console.print(t(f"{_tag('config')} 已设置 {key} = {val!r}",
+                         f"{_tag('config')} set {key} = {val!r}"))
         # 提示哪些配置需要重启生效
         if key.startswith("llm."):
-            _console.print("[dim]⚠ llm.* 配置修改后需重启 frontend 才生效[/dim]")
+            _console.print(t("[dim]⚠ llm.* 配置修改后需重启 frontend 才生效[/dim]",
+                             "[dim]⚠ llm.* changes take effect only after restarting the frontend[/dim]"))
         else:
-            _console.print(f"[dim]✓ {key} 下次轮询自动生效[/dim]")
+            _console.print(t(f"[dim]✓ {key} 下次轮询自动生效[/dim]",
+                             f"[dim]✓ {key} takes effect on the next poll[/dim]"))
         return
 
     if sub == "list":
@@ -292,8 +349,8 @@ def _cmd_config(line: str) -> None:
         if isinstance(cfg.get("llm"), dict) and "api_key" in cfg["llm"]:
             cfg = json.loads(json.dumps(cfg))  # deep copy
             ak = cfg["llm"].get("api_key") or ""
-            cfg["llm"]["api_key"] = f"(hidden, 长度 {len(ak)})"
-        _console.print(f"{_tag('config')} 当前配置:")
+            cfg["llm"]["api_key"] = t(f"(hidden, 长度 {len(ak)})", f"(hidden, length {len(ak)})")
+        _console.print(t(f"{_tag('config')} 当前配置:", f"{_tag('config')} current config:"))
         for k, v in cfg.items():
             if isinstance(v, dict):
                 _console.print(f"  [bold]{k}[/bold]:")
@@ -301,19 +358,22 @@ def _cmd_config(line: str) -> None:
                     _console.print(f"    [dim]{sk}[/dim]: {sv!r}")
             else:
                 _console.print(f"  [bold]{k}[/bold]: {v!r}")
-        _console.print(f"[dim]路径: {CONFIG_FILE}[/dim]")
+        _console.print(t(f"[dim]路径: {CONFIG_FILE}[/dim]", f"[dim]Path: {CONFIG_FILE}[/dim]"))
         return
 
-    _console.print(f"{_tag('config')} 子命令: get / set / list / path")
+    _console.print(t(f"{_tag('config')} 子命令: get / set / list / path",
+                     f"{_tag('config')} subcommand: get / set / list / path"))
 
 
 def _confirm_dangerous(action_desc: str) -> bool:
     """危险操作二次确认（Minecraft 删除世界风格）"""
     _console.print(
-        f"[bold red]⚠ 你确定要永久{action_desc}吗？此操作无法撤销！（真的很久！）[/bold red]"
+        t(f"[bold red]⚠ 你确定要永久{action_desc}吗？此操作无法撤销！（真的很久！）[/bold red]",
+          f"[bold red]⚠ Are you sure you want to permanently {action_desc}? "
+          f"This cannot be undone! (a really long time!)[/bold red]")
     )
     try:
-        ans = input("  确认？[y/N] > ").strip().lower()
+        ans = input(t("  确认？[y/N] > ", "  Confirm? [y/N] > ")).strip().lower()
     except (EOFError, KeyboardInterrupt):
         return False
     return ans in ("y", "yes", "是")
@@ -342,7 +402,8 @@ def repl_loop(model: AgentModel, view: TerminalView,
             line = _console.input(prompt)
         except (EOFError, KeyboardInterrupt):
             _console.print()
-            _console.print(f"{_tag('interrupt')} 已返回提示符")
+            _console.print(t(f"{_tag('interrupt')} 已返回提示符",
+                             f"{_tag('interrupt')} back to prompt"))
             continue
 
         line = line.strip()
@@ -353,7 +414,7 @@ def repl_loop(model: AgentModel, view: TerminalView,
         if line in ("/exit", "/quit"):
             break
         if line in ("/help", "/h", "?"):
-            _console.print(_HELP)
+            _console.print(_help_text())
             continue
         if line == "/config" or line.startswith("/config "):
             _cmd_config(line)
@@ -381,20 +442,25 @@ def repl_loop(model: AgentModel, view: TerminalView,
                 permission_handler=None, state=state,
                 session_id=sid, session_manager=sm,
             )
-            _console.print(f"{_tag('session')} 正在用 LLM 压缩当前会话历史…")
+            _console.print(t(f"{_tag('session')} 正在用 LLM 压缩当前会话历史…",
+                             f"{_tag('session')} compressing current session history with the LLM..."))
             try:
                 model.ensure_loop()
                 res = asyncio.run(agent.summarize_history(force=force_all))
             except KeyboardInterrupt:
-                _console.print(f"{_tag('interrupt')} 已取消压缩")
+                _console.print(t(f"{_tag('interrupt')} 已取消压缩",
+                                 f"{_tag('interrupt')} compression cancelled"))
                 continue
             except Exception as e:
-                _console.print(f"{_tag('error')} 压缩失败: {e}")
+                _console.print(t(f"{_tag('error')} 压缩失败: {e}",
+                                 f"{_tag('error')} compression failed: {e}"))
                 continue
             if res is None:
                 _console.print(
-                    f"{_tag('session')} 没有足够的新增历史可压缩"
-                    f"（若想重生成摘要，请用 /compress all）"
+                    t(f"{_tag('session')} 没有足够的新增历史可压缩"
+                      f"（若想重生成摘要，请用 /compress all）",
+                      f"{_tag('session')} not enough new history to compress"
+                      f" (to regenerate the summary, use /compress all)")
                 )
             else:
                 summary, covered = res
@@ -402,40 +468,51 @@ def repl_loop(model: AgentModel, view: TerminalView,
                 if len(preview) > 160:
                     preview = preview[:160] + "…"
                 _console.print(
-                    f"{_tag('session')} 已压缩 {covered} 条旧消息为摘要"
-                    f"（保留最近 10 条原文），后续轮次将携带该摘要上下文"
+                    t(f"{_tag('session')} 已压缩 {covered} 条旧消息为摘要"
+                      f"（保留最近 10 条原文），后续轮次将携带该摘要上下文",
+                      f"{_tag('session')} compressed {covered} old messages into a summary"
+                      f" (kept the latest 10 raw), later turns will carry this summary")
                 )
-                _console.print(f"[dim]  摘要预览: {preview}[/dim]")
+                _console.print(t(f"[dim]  摘要预览: {preview}[/dim]",
+                                 f"[dim]  summary preview: {preview}[/dim]"))
             continue
         if line == "/clear":
             meta = sm.get(sid) or {}
             if not _confirm_dangerous(
-                    f"清空会话 {sid[:6]} 的历史（{meta.get('steps_total', 0)} 步、"
-                    f"{meta.get('tokens_total', 0)} tokens 将丢失）"):
-                _console.print("[dim]已取消[/dim]")
+                    t(f"清空会话 {sid[:6]} 的历史（{meta.get('steps_total', 0)} 步、"
+                      f"{meta.get('tokens_total', 0)} tokens 将丢失）",
+                      f"clear the history of session {sid[:6]} "
+                      f"({meta.get('steps_total', 0)} steps, "
+                      f"{meta.get('tokens_total', 0)} tokens will be lost)")):
+                _console.print(t("[dim]已取消[/dim]", "[dim]cancelled[/dim]"))
                 continue
             state.clear()
             sm.update(sid, tokens_total=0, steps_total=0,
                       summary="", status="active")
-            _console.print(f"{_tag('session')} 已清空 {sid[:6]}")
+            _console.print(t(f"{_tag('session')} 已清空 {sid[:6]}",
+                             f"{_tag('session')} cleared {sid[:6]}"))
             continue
         if line == "/deleteall" or line.startswith("/deleteall "):
             # 删除所有会话（mc 风格二次确认）
             all_sessions = sm.list_all()
             total_steps = sum(s.get("steps_total", 0) for s in all_sessions)
             total_tokens = sum(s.get("tokens_total", 0) for s in all_sessions)
-            desc = (f"删除所有 {len(all_sessions)} 个会话（共 {total_steps} 步、"
-                    f"{total_tokens} tokens，将连同文件一并删除）")
+            desc = t(f"删除所有 {len(all_sessions)} 个会话（共 {total_steps} 步、"
+                     f"{total_tokens} tokens，将连同文件一并删除）",
+                     f"delete all {len(all_sessions)} sessions ({total_steps} steps, "
+                     f"{total_tokens} tokens; their files will be removed too)")
             if not _confirm_dangerous(desc):
-                _console.print("[dim]已取消[/dim]")
+                _console.print(t("[dim]已取消[/dim]", "[dim]cancelled[/dim]"))
                 continue
             removed = sm.delete_all()
-            _console.print(f"{_tag('session')} 已删除 {removed} 个会话")
+            _console.print(t(f"{_tag('session')} 已删除 {removed} 个会话",
+                             f"{_tag('session')} deleted {removed} sessions"))
             # 必须开新 session（当前也已被删）
-            sid = sm.create(mode=default_mode, task="(新会话)")
+            sid = sm.create(mode=default_mode, task=t("(新会话)", "(new session)"))
             state = State(sm.path_for(sid))
             sm.set_current(sid)
-            _console.print(f"{_tag('session')} 已开新 session {sid[:6]}")
+            _console.print(t(f"{_tag('session')} 已开新 session {sid[:6]}",
+                             f"{_tag('session')} opened new session {sid[:6]}"))
             continue
         if line.startswith("/delete") or line.startswith("/del"):
             parts = line.split()
@@ -447,23 +524,29 @@ def repl_loop(model: AgentModel, view: TerminalView,
                 if len(matches) == 1:
                     target_sid = matches[0]
                 elif not matches:
-                    _console.print(f"{_tag('error')} 找不到会话 {target_sid}")
+                    _console.print(t(f"{_tag('error')} 找不到会话 {target_sid}", f"{_tag('error')} session not found: {target_sid}"))
                     continue
                 else:
                     _console.print(
-                        f"{_tag('error')} 匹配多个会话: "
-                        f"{' / '.join(m[:6] for m in matches)}，请输更长的前缀"
+                        t(f"{_tag('error')} 匹配多个会话: "
+                          f"{' / '.join(m[:6] for m in matches)}，请输更长的前缀",
+                          f"{_tag('error')} matches multiple sessions: "
+                          f"{' / '.join(m[:6] for m in matches)}, please type a longer prefix")
                     )
                     continue
             meta = sm.get(target_sid) or {}
-            desc = (f"删除会话 {target_sid[:6]}（{meta.get('mode', '?')} 模式、"
-                    f"{meta.get('steps_total', 0)} 步、"
-                    f"{meta.get('tokens_total', 0)} tokens，将连同文件一并删除）")
+            desc = t(f"删除会话 {target_sid[:6]}（{meta.get('mode', '?')} 模式、"
+                     f"{meta.get('steps_total', 0)} 步、"
+                     f"{meta.get('tokens_total', 0)} tokens，将连同文件一并删除）",
+                     f"delete session {target_sid[:6]} ({meta.get('mode', '?')} mode, "
+                     f"{meta.get('steps_total', 0)} steps, "
+                     f"{meta.get('tokens_total', 0)} tokens; its files will be removed too)")
             if not _confirm_dangerous(desc):
-                _console.print("[dim]已取消[/dim]")
+                _console.print(t("[dim]已取消[/dim]", "[dim]cancelled[/dim]"))
                 continue
             if sm.delete(target_sid):
-                _console.print(f"{_tag('session')} 已删除会话 {target_sid[:6]}")
+                _console.print(t(f"{_tag('session')} 已删除会话 {target_sid[:6]}",
+                                 f"{_tag('session')} deleted session {target_sid[:6]}"))
                 if target_sid == sid:
                     # 删的就是当前 session → 切回上次活跃的，没有就开新
                     prev_sid = sm.last_session_id()
@@ -474,38 +557,49 @@ def repl_loop(model: AgentModel, view: TerminalView,
                         sm.set_current(sid)
                         meta = sm.get(sid) or {}
                         _console.print(
-                            f"{_tag('session')} 已切回上次会话 {sid[:6]} · "
-                            f"{meta.get('mode', '?')} 模式 · "
-                            f"{meta.get('steps_total', 0)} 步累计 · "
-                            f"{meta.get('tokens_total', 0)} tokens"
+                            t(f"{_tag('session')} 已切回上次会话 {sid[:6]} · "
+                              f"{meta.get('mode', '?')} 模式 · "
+                              f"{meta.get('steps_total', 0)} 步累计 · "
+                              f"{meta.get('tokens_total', 0)} tokens",
+                              f"{_tag('session')} switched back to last session {sid[:6]} · "
+                              f"{meta.get('mode', '?')} mode · "
+                              f"{meta.get('steps_total', 0)} steps total · "
+                              f"{meta.get('tokens_total', 0)} tokens")
                         )
                     else:
-                        sid = sm.create(mode=default_mode, task="(新会话)")
+                        sid = sm.create(mode=default_mode, task=t("(新会话)", "(new session)"))
                         state = State(sm.path_for(sid))
                         sm.set_current(sid)
                         _console.print(
-                            f"{_tag('session')} 没有可切回的会话，已开新 session {sid[:6]}"
+                            t(f"{_tag('session')} 没有可切回的会话，已开新 session {sid[:6]}",
+                              f"{_tag('session')} no session to switch back to, "
+                              f"opened new session {sid[:6]}")
                         )
             else:
-                _console.print(f"{_tag('session')} 删除失败（会话不存在？）")
+                _console.print(t(f"{_tag('session')} 删除失败（会话不存在？）",
+                                 f"{_tag('session')} delete failed (session not found?)"))
             continue
         if line == "/new":
             # 开新 session（保留旧的，可 /switch 回看）
             # 同时把当前 default_mode 带过去
-            sid = sm.create(mode=default_mode, task="(新会话)")
+            sid = sm.create(mode=default_mode, task=t("(新会话)", "(new session)"))
             state = State(sm.path_for(sid))
             sm.set_current(sid)
-            _console.print(f"{_tag('session')} 已切换到新 session {sid}")
+            _console.print(t(f"{_tag('session')} 已切换到新 session {sid}",
+                             f"{_tag('session')} switched to new session {sid}"))
             continue
         if line.startswith("/mode"):
             parts = line.split()
             if len(parts) == 1:
-                _console.print(f"当前默认 mode: {default_mode}")
+                _console.print(t(f"当前默认 mode: {default_mode}",
+                                 f"current default mode: {default_mode}"))
             elif parts[1] in ("ask", "do", "review"):
                 default_mode = parts[1]
-                _console.print(f"默认 mode → {default_mode}")
+                _console.print(t(f"默认 mode → {default_mode}",
+                                 f"default mode → {default_mode}"))
             else:
-                _console.print(f"{_tag('error')} 未知 mode: {parts[1]}")
+                _console.print(t(f"{_tag('error')} 未知 mode: {parts[1]}",
+                                 f"{_tag('error')} unknown mode: {parts[1]}"))
             continue
         if line.startswith("/switch "):
             new_sid = line[len("/switch "):].strip()
@@ -515,21 +609,25 @@ def repl_loop(model: AgentModel, view: TerminalView,
                 if len(matches) == 1:
                     new_sid = matches[0]
                 elif not matches:
-                    _console.print(f"{_tag('error')} 找不到会话 {new_sid}")
+                    _console.print(t(f"{_tag('error')} 找不到会话 {new_sid}",
+                                     f"{_tag('error')} session not found: {new_sid}"))
                     continue
                 else:
                     _console.print(
-                        f"{_tag('error')} 匹配多个会话: "
-                        f"{' / '.join(m for m in matches)}，请输更长的前缀"
+                        t(f"{_tag('error')} 匹配多个会话: "
+                          f"{' / '.join(m for m in matches)}，请输更长的前缀",
+                          f"{_tag('error')} matches multiple sessions: "
+                          f"{' / '.join(m for m in matches)}, please type a longer prefix")
                     )
                     continue
             sid = new_sid
             state = State(sm.path_for(sid))
             sm.set_current(sid)
-            _console.print(f"{_tag('session')} 切换到 {sid}")
+            _console.print(t(f"{_tag('session')} 切换到 {sid}", f"{_tag('session')} switched to {sid}"))
             continue
         if line.startswith("/"):
-            _console.print(f"{_tag('error')} 未知命令: {line}（/help 查看可用命令）")
+            _console.print(t(f"{_tag('error')} 未知命令: {line}（/help 查看可用命令）",
+                             f"{_tag('error')} unknown command: {line} (/help for available commands)"))
             continue
 
         # —— 任务执行 ——
@@ -542,7 +640,8 @@ def repl_loop(model: AgentModel, view: TerminalView,
             task = line
 
         if not task:
-            _console.print(f"{_tag('error')} 任务不能为空")
+            _console.print(t(f"{_tag('error')} 任务不能为空",
+                             f"{_tag('error')} task cannot be empty"))
             continue
 
         trust = mode in _WRITE_MODES
@@ -595,14 +694,18 @@ def repl_loop(model: AgentModel, view: TerminalView,
                 # run 结束后提示用户切换 session
                 if last.get("max_steps_hit"):
                     _console.print(
-                        f"[yellow]⚠ 当前会话已达最大步数，建议 /new 开启新会话 "
-                        f"(累计 {step_acc} 步、{tok_acc} tokens)[/yellow]"
+                        t(f"[yellow]⚠ 当前会话已达最大步数，建议 /new 开启新会话 "
+                          f"(累计 {step_acc} 步、{tok_acc} tokens)[/yellow]",
+                          f"[yellow]⚠ session reached max steps, consider /new to start a new session "
+                          f"({step_acc} steps, {tok_acc} tokens total)[/yellow]")
                     )
                     last["max_steps_hit"] = False
                 elif last.get("new_task"):
                     _console.print(
-                        f"[yellow]⚠ 检测到新任务，建议 /new 切换会话 "
-                        f"(累计 {step_acc} 步、{tok_acc} tokens)[/yellow]"
+                        t(f"[yellow]⚠ 检测到新任务，建议 /new 切换会话 "
+                          f"(累计 {step_acc} 步、{tok_acc} tokens)[/yellow]",
+                          f"[yellow]⚠ new task detected, consider /new to switch session "
+                          f"({step_acc} steps, {tok_acc} tokens total)[/yellow]")
                     )
                     last["new_task"] = False
 
@@ -622,12 +725,17 @@ def repl_loop(model: AgentModel, view: TerminalView,
                           steps_total=stats["steps"],
                           last_status="interrupted")
                 _console.print(
-                    f"[dim]截至中断: {stats['steps']} 步 · "
-                    f"[cyan]↑{u['prompt_tokens']} tokens[/cyan] "
-                    f"[magenta]↓{u['completion_tokens']} tokens[/magenta] "
-                    f"[bold]Σ {u['total_tokens']} tokens[/bold][/dim]"
+                    t(f"[dim]截至中断: {stats['steps']} 步 · "
+                      f"[cyan]↑{u['prompt_tokens']} tokens[/cyan] "
+                      f"[magenta]↓{u['completion_tokens']} tokens[/magenta] "
+                      f"[bold]Σ {u['total_tokens']} tokens[/bold][/dim]",
+                      f"[dim]at interruption: {stats['steps']} steps · "
+                      f"[cyan]↑{u['prompt_tokens']} tokens[/cyan] "
+                      f"[magenta]↓{u['completion_tokens']} tokens[/magenta] "
+                      f"[bold]Σ {u['total_tokens']} tokens[/bold][/dim]")
                 )
-            _console.print(f"{_tag('interrupt')} 用户中止，已返回提示符")
+            _console.print(t(f"{_tag('interrupt')} 用户中止，已返回提示符",
+                             f"{_tag('interrupt')} user interrupted, back to prompt"))
         except Exception as e:
             view._close_content(preserve=False)
             view._stop_thinking()
@@ -647,7 +755,8 @@ def run_frontend(args: argparse.Namespace) -> None:
     # 启动时清理空 session（启动后立刻 /exit 残留的）
     removed = sm.cleanup_empty()
     if removed:
-        _console.print(f"[dim]{_tag('session')} 清理了 {removed} 个空 session[/dim]")
+        _console.print(t(f"[dim]{_tag('session')} 清理了 {removed} 个空 session[/dim]",
+                         f"[dim]{_tag('session')} cleaned up {removed} empty sessions[/dim]"))
 
     cont = args.continue_session
     force_new = args.new
@@ -659,13 +768,15 @@ def run_frontend(args: argparse.Namespace) -> None:
             # 指针失效再按最近活跃时间兜底
             sid = sm.get_current() or sm.last_session_id() or ""
             if not sid:
-                raise SystemExit(f"{_tag('session')} 没有可续接的会话")
+                raise SystemExit(t(f"{_tag('session')} 没有可续接的会话",
+                                   f"{_tag('session')} no session to resume"))
         if not sm.get(sid):
-            raise SystemExit(f"{_tag('session')} 会话 {sid} 不存在")
+            raise SystemExit(t(f"{_tag('session')} 会话 {sid} 不存在",
+                               f"{_tag('session')} session {sid} does not exist"))
         sm.update(sid, status="active", mode=args.mode)
         resumed = True
     elif force_new:
-        sid = sm.create(mode=args.mode, task="(交互式会话)")
+        sid = sm.create(mode=args.mode, task=t("(交互式会话)", "(interactive session)"))
         resumed = False
     else:
         # 默认：优先精确恢复上次使用的会话（.current 指针），否则新建
@@ -676,7 +787,7 @@ def run_frontend(args: argparse.Namespace) -> None:
             sm.update(sid, status="active", mode=args.mode)
             resumed = True
         else:
-            sid = sm.create(mode=args.mode, task="(交互式会话)")
+            sid = sm.create(mode=args.mode, task=t("(交互式会话)", "(interactive session)"))
             resumed = False
 
     sm.set_current(sid)  # 记录当前会话，/switch、崩溃后重启均可靠恢复
@@ -738,7 +849,7 @@ def _render_banner(console, sm, sid: str, resumed: bool, args) -> None:
     model_line = Text()
     model_line.append("  model: ", style="dim")
     model_line.append(model_name, style="")
-    model_line.append("  ·  单任务max_steps: ", style="dim")
+    model_line.append(t("  ·  单任务max_steps: ", "  ·  max_steps/task: "), style="dim")
     model_line.append(str(max_steps), style="")
     lines.append(model_line)
 
@@ -752,22 +863,22 @@ def _render_banner(console, sm, sid: str, resumed: bool, args) -> None:
     # 6. 快捷提示（两行：模式前缀 + 自然语言导航）
     # 模式行
     sh_mode = Text()
-    sh_mode.append("  模式: ", style="dim")
+    sh_mode.append(t("  模式: ", "  mode: "), style="dim")
     sh_mode.append(":ask", style="bold")
-    sh_mode.append(" 只读 · ", style="dim")
+    sh_mode.append(t(" 只读 · ", " read-only · "), style="dim")
     sh_mode.append(":do", style="bold")
-    sh_mode.append(" 执行 · ", style="dim")
+    sh_mode.append(t(" 执行 · ", " execute · "), style="dim")
     sh_mode.append(":review", style="bold")
-    sh_mode.append(" 审查", style="dim")
+    sh_mode.append(t(" 审查", " code review"), style="dim")
     lines.append(sh_mode)
     # 命令行（自然语言，强调 /help 查看所有命令）
     sh_cmd = Text()
     # sh_cmd.append("  命令: ", style="dim")
-    sh_cmd.append("  键入 ", style="dim")
+    sh_cmd.append(t("  键入 ", "  type "), style="dim")
     sh_cmd.append("/help", style="bold")
-    sh_cmd.append(" 查看所有命令，", style="dim")
+    sh_cmd.append(t(" 查看所有命令，", " to list all commands, "), style="dim")
     sh_cmd.append("/exit", style="bold")
-    sh_cmd.append(" 退出", style="dim")
+    sh_cmd.append(t(" 退出", " to quit"), style="dim")
     lines.append(sh_cmd)
 
     body = Group(*lines)
@@ -789,17 +900,17 @@ def _render_banner(console, sm, sid: str, resumed: bool, args) -> None:
 
         head = Text()
         head.append("  ↻ ", style="bold green")
-        head.append(f"已恢复会话 ", style="")
+        head.append(t("已恢复会话 ", "resumed session "), style="")
         head.append(sid[:12], style="bold yellow")
         head.append("  ·  ", style="dim")
-        head.append(f"{steps} 步", style="")
+        head.append(t(f"{steps} 步", f"{steps} steps"), style="")
         head.append("  ·  ", style="dim")
         head.append(f"{tokens:,} tokens", style="")
         console.print(head)
 
         if task_preview:
             task_line = Text()
-            task_line.append("    ↳ 上次任务: ", style="dim")
+            task_line.append(t("    ↳ 上次任务: ", "    ↳ last task: "), style="dim")
             task_line.append(task_preview, style="italic")
             console.print(task_line)
 
@@ -809,43 +920,45 @@ def _render_banner(console, sm, sid: str, resumed: bool, args) -> None:
             todo_text = Text()
             done_count = sum(1 for t in todos if t.get("status") == "completed")
             total = len(todos)
-            todo_text.append(f"    📋 进度: {done_count}/{total} 项完成", style="cyan")
+            todo_text.append(t(f"    📋 进度: {done_count}/{total} 项完成",
+                               f"    📋 progress: {done_count}/{total} done"), style="cyan")
             console.print(todo_text)
-            for t in todos[:5]:  # 最多显示 5 项
-                status = t.get("status", "pending")
+            for item in todos[:5]:  # 最多显示 5 项
+                status = item.get("status", "pending")
                 icon = {"pending": "○", "in_progress": "◐",
                         "completed": "●"}.get(status, "○")
                 color = {"pending": "dim", "in_progress": "yellow",
                          "completed": "green"}.get(status, "dim")
                 line = Text()
                 line.append(f"      {icon} ", style=color)
-                line.append(t.get("content", "?"), style=color)
+                line.append(item.get("content", "?"), style=color)
                 console.print(line)
             if len(todos) > 5:
                 more = Text()
-                more.append(f"      ... 还有 {len(todos) - 5} 项", style="dim")
+                more.append(t(f"      ... 还有 {len(todos) - 5} 项",
+                              f"      ... {len(todos) - 5} more"), style="dim")
                 console.print(more)
 
         tip_line = Text()
-        tip_line.append("    提示: ", style="cyan")
-        tip_line.append("直接键入任务继续，或 ", style="dim")
+        tip_line.append(t("    提示: ", "    tip: "), style="cyan")
+        tip_line.append(t("直接键入任务继续，或 ", "type a task to continue, or "), style="dim")
         tip_line.append("/new", style="bold")
-        tip_line.append(" 开新会话", style="dim")
+        tip_line.append(t(" 开新会话", " to start a new session"), style="dim")
         console.print(tip_line)
     else:
         head = Text()
         head.append("  ✨ ", style="bold magenta")
-        head.append(f"新会话 ", style="")
+        head.append(t("新会话 ", "new session "), style="")
         head.append(sid[:12], style="bold yellow")
         console.print(head)
 
         tip_line = Text()
-        tip_line.append("    提示: ", style="cyan")
-        tip_line.append("键入任务开始，或 ", style="dim")
+        tip_line.append(t("    提示: ", "    tip: "), style="cyan")
+        tip_line.append(t("键入任务开始，或 ", "type a task to begin, or "), style="dim")
         tip_line.append(":do", style="bold")
-        tip_line.append(" 切执行模式 / ", style="dim")
+        tip_line.append(t(" 切执行模式 / ", " to switch to do mode / "), style="dim")
         tip_line.append(":ask", style="bold")
-        tip_line.append(" 切只读模式", style="dim")
+        tip_line.append(t(" 切只读模式", " to switch to read-only mode"), style="dim")
         console.print(tip_line)
     console.print()
 
@@ -867,6 +980,8 @@ def _justify_row(left: Text, right: Text, width: int | None = None) -> Text:
 
 
 def main() -> int:
+    # 尽早按配置确定输出语言，保证 banner / help 文案也走对应语言
+    set_lang(load_config().get("lang"))
     parser = build_parser()
     args = parser.parse_args()
     try:

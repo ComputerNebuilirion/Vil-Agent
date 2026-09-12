@@ -3,16 +3,17 @@ import subprocess
 import sys
 
 from . import tool
+from ..i18n import L
 
 
 @tool(
     name="run_command",
-    description="执行 shell 命令并返回输出（需要 --trust）",
+    description=L("执行 shell 命令并返回输出（需要 --trust）", "Run a shell command and return its output (requires --trust)"),
     parameters={
         "type": "object",
         "properties": {
-            "command": {"type": "string", "description": "要执行的 shell 命令"},
-            "timeout": {"type": "number", "description": "超时秒数", "default": 30},
+            "command": {"type": "string", "description": L("要执行的 shell 命令", "Shell command to run")},
+            "timeout": {"type": "number", "description": L("超时秒数", "Timeout in seconds"), "default": 30},
         },
         "required": ["command"],
     },

@@ -7,6 +7,8 @@ import platform
 import subprocess
 from pathlib import Path
 
+from .i18n import t
+
 
 class Context:
     """
@@ -30,10 +32,11 @@ class Context:
     def render_for_prompt(self) -> str:
         ctx = self.collect()
         lines = [
-            "## 工作区上下文",
-            f"- 路径: {ctx['workspace']}",
-            f"- 平台: {ctx['platform']}",
-            f"- Git 分支: {ctx['git_branch'] or '(无)'}",
+            t("## 工作区上下文", "## Workspace context"),
+            t(f"- 路径: {ctx['workspace']}", f"- Path: {ctx['workspace']}"),
+            t(f"- 平台: {ctx['platform']}", f"- Platform: {ctx['platform']}"),
+            t(f"- Git 分支: {ctx['git_branch'] or '(无)'}",
+              f"- Git branch: {ctx['git_branch'] or '(none)'}"),
         ]
 
         gs = ctx["git_status"]
@@ -41,14 +44,17 @@ class Context:
             gs_lines = gs.splitlines()
             # 改动多时只取前 30 行，避免 status 本身臃胀
             if len(gs_lines) > 30:
-                lines.append(f"- Git 状态 ({len(gs_lines)} 项，仅列前 30):")
+                lines.append(t(f"- Git 状态 ({len(gs_lines)} 项，仅列前 30):",
+                               f"- Git status ({len(gs_lines)} entries, first 30 shown):"))
                 lines.append("```\n" + "\n".join(gs_lines[:30]) + "\n```")
             else:
-                lines.append(f"- Git 状态:\n```\n{gs}\n```")
+                lines.append(t(f"- Git 状态:\n```\n{gs}\n```",
+                               f"- Git status:\n```\n{gs}\n```"))
         else:
-            lines.append("- Git 状态: clean")
+            lines.append(t("- Git 状态: clean", "- Git status: clean"))
 
-        lines.append("- 提示: 用 list_dir / search_code 工具按需浏览文件，不要假定文件结构。")
+        lines.append(t("- 提示: 用 list_dir / search_code 工具按需浏览文件，不要假定文件结构。",
+                      "- Hint: use list_dir / search_code to browse files as needed; do not assume the file structure."))
         return "\n".join(lines)
 
     def _git_status(self) -> str:

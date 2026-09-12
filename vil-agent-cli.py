@@ -34,6 +34,7 @@ from VilAgent.agent_app import (
     SESSIONS_DIR as _SESSIONS_DIR,
     console as _console,
 )
+from VilAgent.i18n import t, set_lang
 
 
 # ===================== Controller =====================
@@ -44,12 +45,16 @@ _WRITE_MODES = {"do"}
 
 def _add_mode_flags(sp: argparse.ArgumentParser) -> None:
     """给模式子命令加公共 flag"""
-    sp.add_argument("--no-stream", action="store_true", help="关闭流式输出")
-    sp.add_argument("--max-steps", type=int, default=None, help="最大步数（默认 50）")
+    sp.add_argument("--no-stream", action="store_true",
+                    help=t("关闭流式输出", "disable streaming output"))
+    sp.add_argument("--max-steps", type=int, default=None,
+                    help=t("最大步数（默认 50）", "max steps (default 50)"))
     sp.add_argument("--continue", dest="continue_session", metavar="SESSION",
-                    help="续接指定会话 ID（'last' 表示最近一次，默认行为）")
+                    help=t("续接指定会话 ID（'last' 表示最近一次，默认行为）",
+                           "resume given session ID ('last' = most recent, the default)"))
     sp.add_argument("--new", dest="new_session", action="store_true",
-                    help="强制新建 session（不续接上次）")
+                    help=t("强制新建 session（不续接上次）",
+                           "force a new session (do not resume the last one)"))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,50 +63,65 @@ def build_parser() -> argparse.ArgumentParser:
         description="Vil Agent",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "示例:\n"
-            "  vil-agent ask 列出当前目录文件并说明项目结构\n"
-            "  vil-agent do 在项目根加 hello.py\n"
-            "  vil-agent do --new 隔离执行不相关任务\n"
-            "  vil-agent do --continue <id> 续接指定会话\n"
-            "  vil-agent review 审查 VilAgent/loop.py\n"
-            "  vil-agent history list\n"
-            "  vil-agent history show <session_id>\n"
-            "  vil-agent history export <session_id> -o out.md\n"
-            "  vil-agent config set llm.temperature 0.3"
+            t(
+                "示例:\n"
+                "  vil-agent ask 列出当前目录文件并说明项目结构\n"
+                "  vil-agent do 在项目根加 hello.py\n"
+                "  vil-agent do --new 隔离执行不相关任务\n"
+                "  vil-agent do --continue <id> 续接指定会话\n"
+                "  vil-agent review 审查 VilAgent/loop.py\n"
+                "  vil-agent history list\n"
+                "  vil-agent history show <session_id>\n"
+                "  vil-agent history export <session_id> -o out.md\n"
+                "  vil-agent config set llm.temperature 0.3",
+                "examples:\n"
+                "  vil-agent ask list files in the current dir and explain the project layout\n"
+                "  vil-agent do add hello.py at the project root\n"
+                "  vil-agent do --new run an unrelated task in isolation\n"
+                "  vil-agent do --continue <id> resume the given session\n"
+                "  vil-agent review review VilAgent/loop.py\n"
+                "  vil-agent history list\n"
+                "  vil-agent history show <session_id>\n"
+                "  vil-agent history export <session_id> -o out.md\n"
+                "  vil-agent config set llm.temperature 0.3",
+            )
         ),
     )
     sub = p.add_subparsers(dest="command", metavar="<command>")
 
     # agent 模式即子命令：必须显式指定
     for name, help_text in [
-        ("ask", "只读分析/规划"),
-        ("do", "执行（允许写操作）"),
-        ("review", "代码审查"),
+        ("ask", t("只读分析/规划", "read-only analysis/planning")),
+        ("do", t("执行（允许写操作）", "execute (writes allowed)")),
+        ("review", t("代码审查", "code review")),
     ]:
         sp = sub.add_parser(name, help=help_text)
-        sp.add_argument("task", nargs="+", help="任务文本")
+        sp.add_argument("task", nargs="+", help=t("任务文本", "task text"))
         _add_mode_flags(sp)
 
     # history：按 session 物理隔离，每个会话一个 jsonl 文件
-    ph = sub.add_parser("history", help="对话历史管理（按 session 隔离）")
+    ph = sub.add_parser("history", help=t("对话历史管理（按 session 隔离）",
+                                          "conversation history (isolated per session)"))
     hsub = ph.add_subparsers(dest="action", required=False, metavar="<action>")
-    hsub.add_parser("list", help="列出所有会话（最近优先）")
-    sh = hsub.add_parser("show", help="显示最近或指定会话内容")
-    sh.add_argument("session", nargs="?", help="会话 ID（缺省=最近一次）")
-    sh.add_argument("-n", type=int, default=10, help="显示消息条数（默认 10）")
-    cl = hsub.add_parser("clear", help="删除最近或指定会话")
-    cl.add_argument("session", nargs="?", help="会话 ID（缺省=最近一次）")
-    ex = hsub.add_parser("export", help="导出会话为 Markdown")
-    ex.add_argument("session", help="会话 ID")
-    ex.add_argument("-o", "--out", help="输出文件路径（默认 session_<id>.md）")
+    hsub.add_parser("list", help=t("列出所有会话（最近优先）", "list all sessions (most recent first)"))
+    sh = hsub.add_parser("show", help=t("显示最近或指定会话内容", "show the most recent or given session"))
+    sh.add_argument("session", nargs="?", help=t("会话 ID（缺省=最近一次）", "session ID (default: most recent)"))
+    sh.add_argument("-n", type=int, default=10, help=t("显示消息条数（默认 10）", "number of messages to show (default 10)"))
+    cl = hsub.add_parser("clear", help=t("删除最近或指定会话", "delete the most recent or given session"))
+    cl.add_argument("session", nargs="?", help=t("会话 ID（缺省=最近一次）", "session ID (default: most recent)"))
+    ex = hsub.add_parser("export", help=t("导出会话为 Markdown", "export a session as Markdown"))
+    ex.add_argument("session", help=t("会话 ID", "session ID"))
+    ex.add_argument("-o", "--out", help=t("输出文件路径（默认 session_<id>.md）",
+                                         "output file path (default session_<id>.md)"))
 
     # config
-    pc = sub.add_parser("config", help="全局配置管理")
+    pc = sub.add_parser("config", help=t("全局配置管理", "global config management"))
     csub = pc.add_subparsers(dest="action", required=False, metavar="<action>")
     ps = csub.add_parser("set", help="set KEY VAL"); ps.add_argument("key"); ps.add_argument("value")
     pg = csub.add_parser("get", help="get KEY"); pg.add_argument("key")
-    csub.add_parser("list", help="列出合并后配置（敏感字段掩码）")
-    csub.add_parser("path", help="显示配置文件路径")
+    csub.add_parser("list", help=t("列出合并后配置（敏感字段掩码）",
+                                   "list the merged config (sensitive fields masked)"))
+    csub.add_parser("path", help=t("显示配置文件路径", "show the config file path"))
 
     p._history_sp = ph
     p._config_sp = pc
@@ -138,27 +158,33 @@ async def run_agent(args: argparse.Namespace) -> None:
             # 优先持久化的当前会话指针，失效再按最近活跃时间兜底
             sid = sm.get_current() or sm.last_session_id() or ""
             if not sid:
-                raise SystemExit("[session] 没有可续接的会话")
+                raise SystemExit(t("[session] 没有可续接的会话",
+                                   "[session] no resumable session"))
         meta = sm.get(sid)
         if not meta:
-            raise SystemExit(f"[session] 会话 {sid} 不存在")
+            raise SystemExit(t(f"[session] 会话 {sid} 不存在",
+                               f"[session] session {sid} not found"))
         # 续接时以当前子命令的 mode 为准（允许 do 续接为 ask 等切换）
         sm.update(sid, status="active", mode=mode)
-        _console.print(f"[dim]\\[session] 续接 {sid}[/dim]")
+        _console.print(t(f"[dim]\\[session] 续接 {sid}[/dim]",
+                         f"[dim]\\[session] resumed {sid}[/dim]"))
     elif force_new:
         # 显式 --new
         sid = sm.create(mode=mode, task=task)
-        _console.print(f"[dim]\\[session] 新建 {sid}[/dim]")
+        _console.print(t(f"[dim]\\[session] 新建 {sid}[/dim]",
+                         f"[dim]\\[session] new {sid}[/dim]"))
     else:
         # 默认：续接上次会话（无则新建）
         last_sid = sm.get_current() or sm.last_session_id()
         if last_sid and sm.get(last_sid):
             sid = last_sid
             sm.update(sid, status="active", mode=mode)
-            _console.print(f"[dim]\\[session] 续接上次 {sid}[/dim]")
+            _console.print(t(f"[dim]\\[session] 续接上次 {sid}[/dim]",
+                             f"[dim]\\[session] resumed last {sid}[/dim]"))
         else:
             sid = sm.create(mode=mode, task=task)
-            _console.print(f"[dim]\\[session] 新建 {sid}[/dim]")
+            _console.print(t(f"[dim]\\[session] 新建 {sid}[/dim]",
+                             f"[dim]\\[session] new {sid}[/dim]"))
 
     sm.set_current(sid)  # 记录当前会话，供下次默认续接
 
@@ -216,11 +242,11 @@ def cmd_history(args: argparse.Namespace) -> int:
         if sid is None:
             sid = sm.last_session_id()
             if not sid:
-                print("[history] (空)")
+                print(t("[history] (空)", "[history] (empty)"))
                 return 0
         meta = sm.get(sid)
         if not meta:
-            print(f"[history] 会话 {sid} 不存在")
+            print(t(f"[history] 会话 {sid} 不存在", f"[history] session {sid} not found"))
             return 1
         state = State(sm.path_for(sid))
         msgs = state.load()
@@ -237,7 +263,8 @@ def cmd_history(args: argparse.Namespace) -> int:
             else:
                 preview = str(content)[:120]
             print(f"[{role}] {preview}")
-        print(f"[history] 共 {len(msgs)} 条，显示最近 {min(n, len(msgs))} 条")
+        print(t(f"[history] 共 {len(msgs)} 条，显示最近 {min(n, len(msgs))} 条",
+                 f"[history] {len(msgs)} messages, showing the latest {min(n, len(msgs))}"))
         return 0
 
     if action == "clear":
@@ -245,26 +272,26 @@ def cmd_history(args: argparse.Namespace) -> int:
         if sid is None:
             sid = sm.last_session_id()
             if not sid:
-                print("[history] (空)")
+                print(t("[history] (空)", "[history] (empty)"))
                 return 0
         if sm.delete(sid):
-            print(f"[history] 已删除会话 {sid}")
+            print(t(f"[history] 已删除会话 {sid}", f"[history] deleted session {sid}"))
             return 0
-        print(f"[history] 会话 {sid} 不存在")
+        print(t(f"[history] 会话 {sid} 不存在", f"[history] session {sid} not found"))
         return 1
 
     if action == "export":
         sid = args.session
         meta = sm.get(sid)
         if not meta:
-            print(f"[history] 会话 {sid} 不存在")
+            print(t(f"[history] 会话 {sid} 不存在", f"[history] session {sid} not found"))
             return 1
         state = State(sm.path_for(sid))
         msgs = state.load()
         md = sm.export_markdown(sid, msgs)
         out = args.out or f"session_{sid}.md"
         Path(out).write_text(md, encoding="utf-8")
-        print(f"[history] 已导出 {out}")
+        print(t(f"[history] 已导出 {out}", f"[history] exported to {out}"))
         return 0
 
     return 1
@@ -273,7 +300,7 @@ def cmd_history(args: argparse.Namespace) -> int:
 def _history_list(sm: SessionManager, limit: int = 20) -> int:
     items = sm.list_all()
     if not items:
-        print("[history] (空)")
+        print(t("[history] (空)", "[history] (empty)"))
         return 0
     print(f"{'ID':<14} {'MODE':<8} {'STEPS':<6} {'TOKENS':<8} "
           f"{'UPDATED':<17} {'TASK'}")
@@ -284,7 +311,8 @@ def _history_list(sm: SessionManager, limit: int = 20) -> int:
               f"{it.get('tokens_total', 0):<8} "
               f"{_fmt_time(it.get('last_active_at', 0)):<17} "
               f"{task}")
-    print(f"[history] 共 {len(items)} 个会话，显示最近 {min(limit, len(items))} 个")
+    print(t(f"[history] 共 {len(items)} 个会话，显示最近 {min(limit, len(items))} 个",
+             f"[history] {len(items)} sessions, showing the latest {min(limit, len(items))}"))
     return 0
 
 
@@ -336,6 +364,8 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    # 尽早按配置确定输出语言，保证 argparse 的 help 文案也走对应语言
+    set_lang(load_config().get("lang"))
     parser = build_parser()
     args = parser.parse_args()
     cmd = args.command
@@ -346,7 +376,7 @@ def main() -> int:
         try:
             asyncio.run(run_agent(args))
         except KeyboardInterrupt:
-            print("\n[interrupt]", file=sys.stderr)
+            print(t("\n[interrupt]", "\n[interrupt]"), file=sys.stderr)
             return 130
         return 0
     if cmd == "history":

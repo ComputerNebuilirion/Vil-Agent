@@ -6,6 +6,8 @@
 import ast
 import re
 
+from ..i18n import t
+
 # ---- 分类用模块/函数表 ----
 NETWORK_MODULES = {
     'socket', 'urllib', 'urllib2', 'requests', 'http.client',
@@ -53,7 +55,7 @@ def classify(code: str) -> dict:
         tree = ast.parse(code)
     except SyntaxError as e:
         return {"risk": "high", "cmd_type": "unknown",
-                "reasons": [f"语法错误: {e}"]}
+                "reasons": [t(f"语法错误: {e}", f"syntax error: {e}")]}
 
     for node in ast.walk(tree):
         # import 语句
@@ -62,25 +64,25 @@ def classify(code: str) -> dict:
                 name = alias.name
                 if _match_module(name, NETWORK_MODULES):
                     found_types.add("network")
-                    reasons.append(f"导入网络模块: {name}")
+                    reasons.append(t(f"导入网络模块: {name}", f"imports network module: {name}"))
                 if _match_module(name, EXEC_MODULES):
                     found_types.add("exec")
-                    reasons.append(f"导入执行模块: {name}")
+                    reasons.append(t(f"导入执行模块: {name}", f"imports exec module: {name}"))
                 if _match_module(name, DANGEROUS_MODULES):
                     risk = "high"
-                    reasons.append(f"导入高危模块: {name}")
+                    reasons.append(t(f"导入高危模块: {name}", f"imports high-risk module: {name}"))
 
         elif isinstance(node, ast.ImportFrom):
             mod = node.module or ""
             if _match_module(mod, NETWORK_MODULES):
                 found_types.add("network")
-                reasons.append(f"从网络模块 {mod} 导入")
+                reasons.append(t(f"从网络模块 {mod} 导入", f"imports from network module {mod}"))
             if _match_module(mod, EXEC_MODULES):
                 found_types.add("exec")
-                reasons.append(f"从执行模块 {mod} 导入")
+                reasons.append(t(f"从执行模块 {mod} 导入", f"imports from exec module {mod}"))
             if _match_module(mod, DANGEROUS_MODULES):
                 risk = "high"
-                reasons.append(f"从高危模块 {mod} 导入")
+                reasons.append(t(f"从高危模块 {mod} 导入", f"imports from high-risk module {mod}"))
 
         elif isinstance(node, ast.Call):
             full = _get_full_name(node.func)
@@ -88,19 +90,19 @@ def classify(code: str) -> dict:
                 continue
             if full in HIGH_RISK_CALLS:
                 risk = "high"
-                reasons.append(f"调用高危函数: {full}")
+                reasons.append(t(f"调用高危函数: {full}", f"calls high-risk function: {full}"))
             if full in EXEC_CALLS:
                 found_types.add("exec")
-                reasons.append(f"调用执行函数: {full}")
+                reasons.append(t(f"调用执行函数: {full}", f"calls exec function: {full}"))
             if full in WRITE_CALLS:
                 found_types.add("write")
-                reasons.append(f"调用写操作: {full}")
+                reasons.append(t(f"调用写操作: {full}", f"calls write operation: {full}"))
             # open() 模式分析
             if full == "open" or full.endswith(".open"):
                 mode = _get_open_mode(node)
                 if mode and any(c in mode for c in ("w", "a", "x", "+")):
                     found_types.add("write")
-                    reasons.append(f"open(mode='{mode}') 写文件")
+                    reasons.append(t(f"open(mode='{mode}') 写文件", f"open(mode='{mode}') writes a file"))
                 else:
                     found_types.add("read")
 
@@ -136,8 +138,9 @@ def check_safety(code: str) -> tuple[bool, str]:
     """
     c = classify(code)
     if c["risk"] == "high":
-        return False, "; ".join(c["reasons"]) or "高风险操作"
-    return True, f"通过预检 (risk={c['risk']}, type={c['cmd_type']})"
+        return False, "; ".join(c["reasons"]) or t("高风险操作", "high-risk operation")
+    return True, t(f"通过预检 (risk={c['risk']}, type={c['cmd_type']})",
+                  f"passed pre-check (risk={c['risk']}, type={c['cmd_type']})")
 
 
 def _match_module(name: str, modules) -> bool:
@@ -178,21 +181,21 @@ def is_valid_python(code: str) -> tuple[bool, str]:
     """验证代码是否为有效 Python"""
     try:
         ast.parse(code)
-        return True, "有效"
+        return True, t("有效", "valid")
     except SyntaxError as e:
-        return False, f"语法错误: {e}"
+        return False, t(f"语法错误: {e}", f"syntax error: {e}")
 
 
 def contains_unsafe_patterns(code: str) -> tuple[bool, str]:
     """正则快速扫不安全模式（补充 AST 漏检的混淆写法提示）"""
     unsafe_patterns = [
-        (r'\b__import__\s*\(', "__import__ 动态导入"),
+        (r'\b__import__\s*\(', t("__import__ 动态导入", "__import__ dynamic import")),
         (r'\bglobals\s*\(\s*\)', "globals()"),
         (r'\blocals\s*\(\s*\)', "locals()"),
-        (r'\bgetattr\s*\(\s*\w+\s*,\s*["\']', "getattr 动态属性访问（可能绕过静态检查）"),
-        (r'__\w+__\s*\(', "dunder 方法调用"),
+        (r'\bgetattr\s*\(\s*\w+\s*,\s*["\']', t("getattr 动态属性访问（可能绕过静态检查）", "getattr dynamic attribute access (may bypass static checks)")),
+        (r'__\w+__\s*\(', t("dunder 方法调用", "dunder method call")),
     ]
     for pattern, desc in unsafe_patterns:
         if re.search(pattern, code):
-            return True, f"检测到可疑模式: {desc}"
-    return False, "安全"
+            return True, t(f"检测到可疑模式: {desc}", f"suspicious pattern detected: {desc}")
+    return False, t("安全", "safe")

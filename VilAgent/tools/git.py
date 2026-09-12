@@ -2,6 +2,7 @@
 import subprocess
 
 from . import tool
+from ..i18n import L
 
 
 def _git(args: list[str], workspace: str, timeout: int = 10) -> str:
@@ -26,7 +27,7 @@ def _git(args: list[str], workspace: str, timeout: int = 10) -> str:
 
 @tool(
     name="git_status",
-    description="查看 git 工作区状态",
+    description=L("查看 git 工作区状态", "Show git working-tree status"),
     parameters={
         "type": "object",
         "properties": {},
@@ -44,12 +45,12 @@ def git_status(_ctx=None) -> str:
 
 @tool(
     name="git_diff",
-    description="查看当前修改的 diff",
+    description=L("查看当前修改的 diff", "Show the diff of current changes"),
     parameters={
         "type": "object",
         "properties": {
-            "staged": {"type": "boolean", "description": "查看已暂存的修改", "default": False},
-            "file": {"type": "string", "description": "指定文件路径", "default": ""},
+            "staged": {"type": "boolean", "description": L("查看已暂存的修改", "Show staged changes"), "default": False},
+            "file": {"type": "string", "description": L("指定文件路径", "Limit to a specific file path"), "default": ""},
         },
         "required": [],
     },
