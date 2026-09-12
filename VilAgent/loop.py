@@ -9,7 +9,9 @@ from .context import Context
 from .i18n import t, get_lang
 from .llm import LLMClient, LLMError
 from .safety import classify
-from .safety.permissions import PermissionSystem, ALLOW, ASK, DENY
+from .safety.permissions import (
+    PermissionSystem, default_rules_file, ALLOW, ASK, DENY,
+)
 from .session import SessionManager
 from .state import State
 from .tools import execute_tool, get_tool_schemas, tool_is_readonly
@@ -87,7 +89,10 @@ class AgentLoop:
         if mode == "do":
             self.trust = True
 
-        # L2 权限系统
+        # L2 权限系统：显式传入优先，否则自动解析 <workspace>/.vil/permissions.json
+        # 或 ~/.vil/permissions.json（让规则文件真正生效）
+        if permissions_file is None:
+            permissions_file = default_rules_file(context.workspace)
         self.permissions = PermissionSystem(
             rules_file=permissions_file, trust=self.trust
         )

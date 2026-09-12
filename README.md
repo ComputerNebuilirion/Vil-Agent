@@ -186,8 +186,11 @@ Windows 没有 OS 级文件/网络沙箱（Claude Code 自己也没做），所�
   高危（`exec/eval/ctypes/win32*`）= 可逃逸沙箱，L3 直接拒；中等（网络/执行/写）= 放行进沙箱并交给 L2 决策。
   `check_safety(code)` 是兼容旧接口，等价于 `classify()["risk"] != "high"`。
 - **L2 `PermissionSystem`** → 工具调用前决策 `allow/ask/deny`。
-  顺序：readonly 工具放行 → 规则文件命中 → 内置规则（`rm/del/format/mkfs` 拒）→ 默认（high risk 拒、无 trust 拒、trust 则 ask）。
-  规则文件 `.vil/permissions.json`：`{"rules":[{"tool":"write_file","pattern":"src/**","action":"allow"}]}`，fnmatch 匹配 `args["path"]` 或 `args["command"]`。
+  顺序：readonly 工具放行 → 内置 deny 硬底线（`rm/del/format/mkfs`，**用户规则无法放行**）→ 用户规则命中 → 默认姿态。
+  **默认姿态（trust 模式 / do 模式）**：写/编辑类工具（`write_file`/`edit_file`）自动 **allow**（低摩擦，自动化友好）；命令/代码执行类（`run_command`/`run_python`）**ask** 人工确认；破坏性工具（`delete_file`）因删除不可逆，亦单独 **ask**；`risk=high` 亦 **ask**。非 trust 模式写/执行一律 **deny**。
+  **规则文件**（自动加载，无需传参）：优先 `<workspace>/.vil/permissions.json`，其次 `~/.vil/permissions.json`；文件损坏时静默忽略不阻断循环。
+  格式：`{"rules":[{"tool":"run_command","pattern":"git *","action":"allow"}]}`，fnmatch 匹配 `args["path"]` / `args["command"]` / `args["code"]`。
+  例：`{"tool":"run_command","action":"allow"}` 可把执行类命令也整体放行（充分自动化）；`{"tool":"write_file","pattern":"src/**","action":"deny"}` 可反向收紧。
   `action="ask"` 时调用 `permission_handler`（由调用方提供，如 CLI 交互输入）。
 - **L3 `sandbox_run(code, timeout, mem_mb, cwd)`** → Windows Job Object 限制内存/CPU/UI，环境清理剥离 API key/secret，超时用 `TerminateJobObject` 杀整个 Job（含后代）。
   默认在系统临时目录建 `sandbox_*` 目录隔离执行，**用后自动清理**（超时/异常路径也会删）；`clean_stale_sandboxes()` 清扫异常退出残留的旧目录。
