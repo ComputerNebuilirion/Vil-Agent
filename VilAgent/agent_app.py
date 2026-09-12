@@ -326,6 +326,9 @@ class TerminalView:
         line.append(f"{e['name']} → {action}", style=color)
         console.print(line)
 
+    async def _on_permission_warning(self, e):
+        console.print(Text(f"  ⚠ {e.get('message', '')}", style="bold yellow"))
+
     async def _on_tool_result(self, e):
         r = e["result"]
         preview = r[:200] + ("…" if len(r) > 200 else "")

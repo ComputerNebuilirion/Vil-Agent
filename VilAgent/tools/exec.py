@@ -4,6 +4,7 @@ import sys
 
 from . import tool
 from ..i18n import L
+from ..safety import match_dangerous_command
 
 
 @tool(
@@ -22,12 +23,10 @@ from ..i18n import L
 def run_command(command: str, timeout: float = 30, _ctx=None) -> str:
     ws = str(_ctx["workspace"])
 
-    # 危险命令黑名单
-    dangerous = ["rm -rf /", "rm -rf ~", "format", "del /f /s /q"]
-    cmd_lower = command.lower()
-    for pattern in dangerous:
-        if pattern in cmd_lower:
-            return f"Error: blocked dangerous command pattern: {pattern}"
+    # 危险命令黑名单（与 L2 权限层硬底线共用同一匹配器，避免两套口径不一致）
+    hit = match_dangerous_command(command)
+    if hit:
+        return f"Error: blocked dangerous command pattern: {hit}"
 
     # Windows 下 shell=True 走 cmd.exe，默认 codepage 936 (GBK)
     # 先 chcp 65001 切到 UTF-8 codepage，让命令输出 UTF-8 字节

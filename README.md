@@ -129,8 +129,9 @@ vil-agent config set lang en     # 写入 ~/.vil/config.json
 - `content_delta`（流式 token）
 - `tool_call`（含 name、args）
 - `tool_result`（含 name、result）
-- `risk_report`（run_python 的 L1 分类：risk / cmd_type / reasons）
+- `risk_report`（run_python 的 L1 分类 / run_command 的命令分类：risk / cmd_type / reasons；命令仅在命中理由时上报）
 - `permission_decision`（L2 决策：name / action）
+- `permission_warning`（规则文件加载失败等权限告警：message；不阻断循环）
 - `llm_response`（每步：step / latency_s / usage）
 - `stats`（收尾：steps / elapsed_s / usage 累加 + `status` 字段，reasoning 为 completion 子集单列；中断时 status="interrupted"，含已完成步数与部分 token 统计）
 - `loop_detected`（连续 3 步相同 tool_calls 签名：step / pattern）
@@ -185,12 +186,14 @@ Windows 没有 OS 级文件/网络沙箱（Claude Code 自己也没做），所�
 - **L1 `classify(code)`** → `{risk: low|medium|high, cmd_type: read|write|network|exec|unknown, reasons: [...]}`。
   高危（`exec/eval/ctypes/win32*`）= 可逃逸沙箱，L3 直接拒；中等（网络/执行/写）= 放行进沙箱并交给 L2 决策。
   `check_safety(code)` 是兼容旧接口，等价于 `classify()["risk"] != "high"`。
+  `classify_command(cmd)`（`cmd_check.py`）是 shell 命令版：对 `run_command` 的命令做风险分级，危险模式（`rm -rf`/`del`/`rd /s`/`format`/`mkfs`/`Remove-Item -Recurse` …）判 `high`，网络工具判 `medium`。
 - **L2 `PermissionSystem`** → 工具调用前决策 `allow/ask/deny`。
-  顺序：readonly 工具放行 → 内置 deny 硬底线（`rm/del/format/mkfs`，**用户规则无法放行**）→ 用户规则命中 → 默认姿态。
+  顺序：readonly 工具放行 → 内置 deny 硬底线（危险命令，**用户规则无法放行**）→ 用户规则命中 → 默认姿态。
+  硬底线用 `match_dangerous_command()` 对命令做**规范化（小写+折叠空白）+ 正则 search**，可覆盖大小写（`RM -RF /`）、前缀（`sudo rm -rf /`）、拼接（`echo x && rm -rf /`）以及 Windows/PowerShell（`del`/`rd /s`/`format`/`Remove-Item -Recurse`）等绕过写法（`exec.py` 复用同一匹配器，避免两套口径不一致）。
   **默认姿态（trust 模式 / do 模式）**：写/编辑类工具（`write_file`/`edit_file`）自动 **allow**（低摩擦，自动化友好）；命令/代码执行类（`run_command`/`run_python`）**ask** 人工确认；破坏性工具（`delete_file`）因删除不可逆，亦单独 **ask**；`risk=high` 亦 **ask**。非 trust 模式写/执行一律 **deny**。
-  **规则文件**（自动加载，无需传参）：优先 `<workspace>/.vil/permissions.json`，其次 `~/.vil/permissions.json`；文件损坏时静默忽略不阻断循环。
-  格式：`{"rules":[{"tool":"run_command","pattern":"git *","action":"allow"}]}`，fnmatch 匹配 `args["path"]` / `args["command"]` / `args["code"]`。
-  例：`{"tool":"run_command","action":"allow"}` 可把执行类命令也整体放行（充分自动化）；`{"tool":"write_file","pattern":"src/**","action":"deny"}` 可反向收紧。
+  **规则文件**（自动加载，无需传参）：优先 `<workspace>/.vil/permissions.json`，其次 `~/.vil/permissions.json`（`permissions_file` 传空串/None 均走此默认解析）；文件损坏时记录告警（`permission_warning` 事件）并忽略，不阻断循环。
+  格式：`{"rules":[{"tool":"run_command","pattern":"git *","action":"allow"}]}`，fnmatch 对 `args["path"]` / `args["command"]` / `args["code"]` **逐个匹配，命中任一即算**。
+  例：`{"tool":"run_command","action":"allow"}`（省略 `pattern`）可把该工具所有调用整体放行（充分自动化）；`{"tool":"write_file","pattern":"src/**","action":"deny"}` 可反向收紧。
   `action="ask"` 时调用 `permission_handler`（由调用方提供，如 CLI 交互输入）。
 - **L3 `sandbox_run(code, timeout, mem_mb, cwd)`** → Windows Job Object 限制内存/CPU/UI，环境清理剥离 API key/secret，超时用 `TerminateJobObject` 杀整个 Job（含后代）。
   默认在系统临时目录建 `sandbox_*` 目录隔离执行，**用后自动清理**（超时/异常路径也会删）；`clean_stale_sandboxes()` 清扫异常退出残留的旧目录。

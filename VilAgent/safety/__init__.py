@@ -1,4 +1,5 @@
 from .ast_check import check_safety, classify, is_valid_python, contains_unsafe_patterns
+from .cmd_check import match_dangerous_command, classify_command, normalize_command
 from .sandbox import sandbox_run, clean_stale_sandboxes
 from .permissions import PermissionSystem, Rule, ALLOW, ASK, DENY
 from pathlib import Path
@@ -23,6 +24,9 @@ def is_path_safe(path: str | Path, workspace: str | Path) -> bool:
 __all__ = [
     "check_safety",
     "classify",
+    "classify_command",
+    "match_dangerous_command",
+    "normalize_command",
     "is_valid_python",
     "contains_unsafe_patterns",
     "sandbox_run",

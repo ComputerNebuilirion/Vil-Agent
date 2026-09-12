@@ -15,12 +15,17 @@ per-action 权限评估就是安全边界。trust 控制默认姿态，规则文
 规则文件（用户可覆盖默认，用于进一步放松或收紧）：
   优先 <workspace>/.vil/permissions.json，其次 ~/.vil/permissions.json
   格式：{"rules":[{"tool":"run_command","pattern":"git *","action":"allow"}]}
-  注意：内置 deny 是硬底线，规则文件里的 allow 无法放行 rm/del/format/mkfs。
+  注意：内置 deny 是硬底线，规则文件里的 allow 无法放行危险命令
+  （rm -rf、del、rd /s、format、mkfs、Remove-Item -Recurse 等，规范化正则匹配，
+   可覆盖大小写/前缀(sudo)/拼接(a && rm ...)等绕过写法）。
 """
 import fnmatch
 import json
 from dataclasses import dataclass
 from pathlib import Path
+
+from ..i18n import t
+from .cmd_check import match_dangerous_command
 
 ALLOW = "allow"
 ASK = "ask"
@@ -40,14 +45,13 @@ class Rule:
     action: str = ASK            # allow / ask / deny
 
 
-# 内置硬底线：这些始终 deny，用户规则不能放行
-# （exec.py 已有黑名单，这里再加一层，兜住任何绕过路径）
-_BUILTIN_RULES: list[Rule] = [
-    Rule(tool="run_command", pattern="rm *", action=DENY),
-    Rule(tool="run_command", pattern="del *", action=DENY),
-    Rule(tool="run_command", pattern="format *", action=DENY),
-    Rule(tool="run_command", pattern="mkfs*", action=DENY),
-]
+# 内置硬底线：命令类工具命中危险命令模式 → 始终 deny，用户规则无法放行
+# （与 exec.py 黑名单统一为同一匹配器，规范化正则可覆盖大小写/前缀/拼接绕过）
+def _builtin_deny(tool_name: str, args: dict) -> str | None:
+    cmd = args.get("command")
+    if isinstance(cmd, str):
+        return match_dangerous_command(cmd)
+    return None
 
 
 def default_rules_file(workspace=None) -> Path | None:
@@ -84,16 +88,22 @@ class PermissionSystem:
         self.trust = trust
         self.rules_file = str(rules_file) if rules_file else ""
         self.user_rules: list[Rule] = []
+        # 规则文件加载失败时的说明（供上层告警，不影响循环继续）
+        self.load_error: str | None = None
         if rules_file:
             p = Path(rules_file)
             if p.exists():
                 self._load_file(p)
 
     def _load_file(self, path: Path) -> None:
-        # 规则文件坏了不能拖垮整个 agent 循环 → 静默忽略
+        # 规则文件坏了不能拖垮整个 agent 循环 → 记录告警并忽略
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as e:
+            self.load_error = t(
+                f"权限规则文件加载失败，已忽略: {path} ({e})",
+                f"failed to load permission rules file, ignored: {path} ({e})",
+            )
             return
         for r in data.get("rules") or []:
             if not isinstance(r, dict):
@@ -109,9 +119,10 @@ class PermissionSystem:
         if rule.tool and rule.tool != tool_name:
             return False
         if rule.pattern:
-            target = (args.get("path") or args.get("command")
-                      or args.get("code") or "")
-            if not fnmatch.fnmatch(str(target), rule.pattern):
+            # 对所有相关字段逐个匹配，命中任一即可（避免 path/command 同时存在时歧义）
+            targets = [str(args[k]) for k in ("path", "command", "code")
+                       if args.get(k)]
+            if not any(fnmatch.fnmatch(tgt, rule.pattern) for tgt in targets):
                 return False
         return True
 
@@ -122,9 +133,8 @@ class PermissionSystem:
             return ALLOW
 
         # 2. 内置硬底线（不可被用户规则放行）
-        for rule in _BUILTIN_RULES:
-            if self._match(rule, tool_name, args):
-                return rule.action
+        if _builtin_deny(tool_name, args):
+            return DENY
 
         # 3. 用户规则（可放松为 allow，或收紧为 ask/deny）
         for rule in self.user_rules:

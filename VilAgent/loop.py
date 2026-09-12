@@ -8,7 +8,7 @@ from typing import Awaitable, Callable
 from .context import Context
 from .i18n import t, get_lang
 from .llm import LLMClient, LLMError
-from .safety import classify
+from .safety import classify, classify_command
 from .safety.permissions import (
     PermissionSystem, default_rules_file, ALLOW, ASK, DENY,
 )
@@ -90,8 +90,8 @@ class AgentLoop:
             self.trust = True
 
         # L2 权限系统：显式传入优先，否则自动解析 <workspace>/.vil/permissions.json
-        # 或 ~/.vil/permissions.json（让规则文件真正生效）
-        if permissions_file is None:
+        # 或 ~/.vil/permissions.json（让规则文件真正生效）；空串也走默认解析
+        if not permissions_file:
             permissions_file = default_rules_file(context.workspace)
         self.permissions = PermissionSystem(
             rules_file=permissions_file, trust=self.trust
@@ -120,6 +120,13 @@ class AgentLoop:
         # 记录用户任务到历史
         user_msg = {"role": "user", "content": task}
         self.state.append(user_msg)
+
+        # 规则文件加载失败：告警但不阻断（用户可能以为规则已生效）
+        if self.permissions.load_error:
+            await self._emit(callback, {
+                "event": "permission_warning",
+                "message": self.permissions.load_error,
+            })
 
         # 长会话摘要：run 开始时检查是否有足够的旧消息需要摘要
         # 花 1 次小 LLM 调用，换后续每步不再重发旧历史——净省 token
@@ -250,6 +257,17 @@ class AgentLoop:
                             "risk": cls["risk"], "cmd_type": cls["cmd_type"],
                             "reasons": cls["reasons"],
                         })
+                    elif name == "run_command" and "command" in args:
+                        # 命令层风险分类（与 run_python 的 AST 分类互补）
+                        cls = classify_command(args["command"])
+                        risk = cls["risk"]
+                        # 仅在命中理由时上报，避免每条普通命令都刷 "risk: low"
+                        if cls["reasons"]:
+                            await self._emit(callback, {
+                                "event": "risk_report", "name": name,
+                                "risk": cls["risk"], "cmd_type": cls["cmd_type"],
+                                "reasons": cls["reasons"],
+                            })
 
                     # L2 权限决策
                     action = self.permissions.evaluate(
