@@ -97,7 +97,7 @@ set_value("llm.api_key", "sk-...")   # 只存全局，绝不进项目文件
 cfg = load_config()                  # 与 DEFAULTS 深合并
 ```
 
-`DEFAULTS`：`llm.{endpoint,model,api_key,temperature(0.2),max_retries(3),retry_base_delay(0.5)}`、`stream(true)`、`default_mode(ask)`、`max_steps(50)`、`max_steps_total(200)`、`context_budget(None=不启用)`、`lang(cn)`。
+`DEFAULTS`：`llm.{endpoint,model,api_key,temperature(0.2),max_retries(3),retry_base_delay(0.5)}`、`stream(true)`、`default_mode(ask)`、`max_steps(50)`、`max_steps_total(200)`、`context_budget(8000=历史超此 token 数自动摘要；置 null 关闭)`、`lang(cn)`。
 文件只存用户实际设的字段（不把 DEFAULTS 写进文件污染），`load_config` 运行时合并。
 
 依赖：`pip install -r requirements.txt`（httpx + rich + tiktoken）。Windows 用户想用 L3 沙箱可手动 `pip install pywin32`。

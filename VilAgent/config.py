@@ -25,6 +25,9 @@ DEFAULTS: dict = {
     # 单轮 run 的硬上限：到达 max_steps 后若仍在推进，自动续跑到此值才停
     # （<= max_steps 时视作不启用自动续跑，等价于原来的单段上限）
     "max_steps_total": 200,
+    # 上下文 token 预算：历史超此值时触发旧消息摘要（loop._maybe_summarize）。
+    # 置为 null 则关闭 token 预算模式（退回按条数滑窗，不自动摘要）。
+    "context_budget": 8000,
     # 输出语言：cn（中文）/ en（英文）；见 VilAgent/i18n.py
     "lang": "cn",
 }
