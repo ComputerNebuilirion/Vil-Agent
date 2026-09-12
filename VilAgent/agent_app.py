@@ -98,14 +98,19 @@ class AgentModel:
     def build_agent(self, mode: str, trust: bool, stream: bool,
                     max_steps: int, permission_handler, state: State,
                     session_id: str = "",
-                    session_manager: SessionManager | None = None):
+                    session_manager: SessionManager | None = None,
+                    max_steps_total: int | None = None):
         # state 由 controller 创建：每个 session 一个独立 jsonl 文件
         # context_budget：超此 token 数时摘要旧消息（None=不启用）
         budget = self.cfg.get("context_budget")
+        # 单轮步数硬上限：到达 max_steps 后自动续跑至此值（<=max_steps 时不启用）
+        if max_steps_total is None:
+            max_steps_total = self.cfg.get("max_steps_total")
         return AgentLoop(
             llm=self.llm, state=state, context=self.ctx,
             mode=mode, trust=trust, stream=stream,
             max_steps=max_steps,
+            max_steps_total=max_steps_total,
             permission_handler=permission_handler,
             context_budget=budget,
             session_id=session_id,
@@ -369,10 +374,20 @@ class TerminalView:
         line.append(e["message"], style="red")
         err_console.print(line)
 
+    async def _on_budget_extended(self, e):
+        # 到达软上限但仍在推进：自动续跑一段（提示用户，可随时 Ctrl+C）
+        console.print(
+            f"[dim]↻ {t('自动续跑', 'auto-extend')}: "
+            f"{e['prev_limit']} → {e['limit']} {t('步', 'steps')}[/dim]"
+        )
+
     async def _on_max_steps(self, e):
         self._close_content()
         err_console.print(
-            f"[yellow]⚠ {t('已达最大步数', 'reached max steps')} ({e['max_steps']})[/yellow]"
+            f"[yellow]⚠ {t('已达本轮步数上限', 'reached step limit')} ({e['max_steps']})"
+            + t("，上下文已保留，输入「继续」可接着做",
+                "; context preserved, type 'continue' to resume")
+            + "[/yellow]"
         )
 
     async def _on_loop_detected(self, e):

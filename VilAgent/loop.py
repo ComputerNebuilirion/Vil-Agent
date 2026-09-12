@@ -52,6 +52,7 @@ class AgentLoop:
         state: State,
         context: Context,
         max_steps: int = 50,
+        max_steps_total: int | None = None,
         mode: str = "ask",
         trust: bool = False,
         stream: bool = False,
@@ -65,6 +66,12 @@ class AgentLoop:
         self.state = state
         self.context = context
         self.max_steps = max_steps
+        # 硬上限：仅在 > max_steps 时启用自动续跑；否则等价于单段上限（不续）
+        self.max_steps_total = (
+            max_steps_total
+            if (max_steps_total and max_steps_total > max_steps)
+            else None
+        )
         self.mode = mode
         self.trust = trust
         self.stream = stream
@@ -100,7 +107,7 @@ class AgentLoop:
 
         :param task: 用户任务文本
         :param callback: 事件回调，接收 dict：
-            {"event": "start"|"step"|"content_delta"|"tool_call"|"tool_result"|"done"|"error"|"max_steps"|"loop_detected"|"interrupted", ...}
+            {"event": "start"|"step"|"content_delta"|"tool_call"|"tool_result"|"done"|"error"|"max_steps"|"budget_extended"|"loop_detected"|"interrupted", ...}
         :return: 最终 assistant 文本
         """
         await self._emit(callback, {"event": "start", "task": task, "mode": self.mode})
@@ -131,7 +138,23 @@ class AgentLoop:
         step_signatures: list[str] = []
 
         try:
-            for step in range(1, self.max_steps + 1):
+            # 软上限 limit 会随续跑增大；到软上限若仍有硬上限额度则自动续跑
+            limit = self.max_steps
+            while True:
+                step += 1
+                if step > limit:
+                    if self.max_steps_total and limit < self.max_steps_total:
+                        new_limit = min(limit + self.max_steps,
+                                        self.max_steps_total)
+                        await self._emit(callback, {
+                            "event": "budget_extended",
+                            "step": step - 1,
+                            "prev_limit": limit,
+                            "limit": new_limit,
+                        })
+                        limit = new_limit
+                    else:
+                        break
                 await self._emit(callback, {"event": "step", "step": step})
 
                 try:
@@ -265,13 +288,13 @@ class AgentLoop:
                     messages.append(tool_msg)
                     self.state.append(tool_msg)
 
-            # 达到最大步数仍未完成
-            await self._emit(callback, {"event": "max_steps", "max_steps": self.max_steps})
-            await self._emit_stats(callback, self.max_steps, t_start, usage_acc,
+            # 达到步数上限仍未完成（上下文保留，可在同一会话续跑）
+            await self._emit(callback, {"event": "max_steps", "max_steps": limit})
+            await self._emit_stats(callback, limit, t_start, usage_acc,
                                    status="max_steps")
-            # 标记 <new_task/> 让前端提示用户 /new 切换 session
-            return t(f"(已达最大步数 {self.max_steps}，建议 /new 切换会话)<new_task/>",
-                     f"(reached max steps {self.max_steps}, consider /new to switch session)<new_task/>")
+            return t(f"(已达本轮步数上限 {limit}，上下文已保留，输入「继续」即可在同一会话接着做)",
+                     f"(reached step limit {limit}; context preserved, "
+                     f"type 'continue' to resume in the same session)")
 
         except KeyboardInterrupt:
             # 用户 Ctrl+C 中止：已写入的历史保留（jsonl append 模式），

@@ -691,12 +691,14 @@ def repl_loop(model: AgentModel, view: TerminalView,
                 sm.update(sid, tokens_total=tok_acc, steps_total=step_acc,
                           status="active", summary=last["content"][:200],
                           last_status=status)
-                # run 结束后提示用户切换 session
+                # run 结束后提示用户：步数上限已到，可在同一会话续跑（勿丢上下文）
                 if last.get("max_steps_hit"):
                     _console.print(
-                        t(f"[yellow]⚠ 当前会话已达最大步数，建议 /new 开启新会话 "
+                        t(f"[yellow]⚠ 已达本轮步数上限，上下文已保留，"
+                          f"输入「继续」可在同一会话接着做 "
                           f"(累计 {step_acc} 步、{tok_acc} tokens)[/yellow]",
-                          f"[yellow]⚠ session reached max steps, consider /new to start a new session "
+                          f"[yellow]⚠ step limit reached; context preserved, "
+                          f"type 'continue' to resume in the same session "
                           f"({step_acc} steps, {tok_acc} tokens total)[/yellow]")
                     )
                     last["max_steps_hit"] = False
@@ -851,6 +853,10 @@ def _render_banner(console, sm, sid: str, resumed: bool, args) -> None:
     model_line.append(model_name, style="")
     model_line.append(t("  ·  单任务max_steps: ", "  ·  max_steps/task: "), style="dim")
     model_line.append(str(max_steps), style="")
+    _total = cfg.get("max_steps_total")
+    if _total and isinstance(_total, int) and _total > max_steps:
+        model_line.append(t(f"(自动续至{_total})", f"(auto-extend to {_total})"),
+                          style="dim")
     lines.append(model_line)
 
     # 5. 分隔线（按 Panel 内宽精确拼 cell_len，前导 2 空格 + ─ 填满）

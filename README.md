@@ -17,6 +17,7 @@
 | Session | `session.py` | `SessionManager`：按 session_uuid 物理隔离历史（`index.json` + `{sid}.jsonl`） |
 | App | `agent_app.py` | MVC 共享层：`AgentModel`（装配 LLM/State/Context + `ensure_loop()` 跨事件循环 httpx 复用）+ `TerminalView`（事件渲染 + 权限交互 + spinner + Live/Markdown 流式） |
 | Config | `config.py` | 全局配置 `~/.vil/config.json`（`load/save/get/set_value`，与 `DEFAULTS` 深合并） |
+| i18n | `i18n.py` | 输出字符串 cn/en 双语：`t()` 立即取值、`L()` 延迟取值、`resolve()` 递归展开 |
 
 ## 目录
 
@@ -30,6 +31,7 @@ VilAgent/
 ├── context.py         工作区上下文采集
 ├── loop.py            ReAct 循环 + 统计累加 + 循环检测 + KeyboardInterrupt 处理 + 长会话摘要触发
 ├── config.py          全局配置 ~/.vil/config.json（load/save/get/set_value，与 DEFAULTS 深合并）
+├── i18n.py            轻量 i18n：输出字符串 cn/en 双语（t 立即 / L 延迟 / resolve 展开）
 ├── safety/
 │   ├── ast_check.py   L1 AST 分类
 │   ├── permissions.py L2 权限系统
@@ -95,16 +97,35 @@ set_value("llm.api_key", "sk-...")   # 只存全局，绝不进项目文件
 cfg = load_config()                  # 与 DEFAULTS 深合并
 ```
 
-`DEFAULTS`：`llm.{endpoint,model,api_key,temperature(0.2),max_retries(3),retry_base_delay(0.5)}`、`stream(true)`、`default_mode(ask)`、`max_steps(50)`、`context_budget(None=不启用)`。
+`DEFAULTS`：`llm.{endpoint,model,api_key,temperature(0.2),max_retries(3),retry_base_delay(0.5)}`、`stream(true)`、`default_mode(ask)`、`max_steps(50)`、`max_steps_total(200)`、`context_budget(None=不启用)`、`lang(cn)`。
 文件只存用户实际设的字段（不把 DEFAULTS 写进文件污染），`load_config` 运行时合并。
 
 依赖：`pip install -r requirements.txt`（httpx + rich + tiktoken）。Windows 用户想用 L3 沙箱可手动 `pip install pywin32`。
+
+## 输出语言（i18n）
+
+用户可见 / LLM 可见的输出字符串支持 **cn（中文，默认）/ en（英文）** 双语；注释与 docstring 保持中文。`i18n.py` 不引入 key 目录，直接 inline 双语，两套取值方式：
+
+```python
+from VilAgent.i18n import set_lang, get_lang, t, L, resolve
+
+t("已取消", "Cancelled")     # 立即求值：运行时用户可见字符串（CLI / frontend / 报错）
+L("读取文件", "Read file")    # 延迟求值：import 期构建、运行期才定语言的场景（@tool 的 description/parameters）
+resolve(obj)                 # 递归把 dict/list 里的 L 实例替换成当前语言字符串
+```
+
+切换语言优先读配置项 `lang`，两个入口启动时 `set_lang(load_config().get("lang"))`：
+
+```bash
+vil-agent config set lang en     # 写入 ~/.vil/config.json
+```
 
 ## 事件回调
 
 `callback` 接收 dict，`event` 字段：
 
 - `start` / `step` / `done` / `max_steps`
+- `budget_extended`（到达软上限 `max_steps` 但仍在推进：step / prev_limit / limit，自动续跑一段）
 - `content_delta`（流式 token）
 - `tool_call`（含 name、args）
 - `tool_result`（含 name、result）
@@ -267,7 +288,7 @@ sessions/
 
 | 角色 | 类 | 职责 |
 |------|---|------|
-| Model | `AgentModel` | 装配 LLM/State/Context；`build_agent(mode, trust, stream, max_steps, permission_handler, state) -> AgentLoop`；`ensure_loop()` 检测事件循环变化 → `LLMClient.recreate_client()` 重建 httpx transport（跨多次 `asyncio.run()` 调用时防 `Event loop is closed`） |
+| Model | `AgentModel` | 装配 LLM/State/Context；`build_agent(mode, trust, stream, max_steps, permission_handler, state, max_steps_total) -> AgentLoop`；`ensure_loop()` 检测事件循环变化 → `LLMClient.recreate_client()` 重建 httpx transport（跨多次 `asyncio.run()` 调用时防 `Event loop is closed`） |
 | View | `TerminalView` | 事件渲染 + 权限交互输入（无业务逻辑，不改 agent 状态） |
 | Controller | `vil-agent-cli.py` / `vil-agent-frontend.py` | 各自实现参数解析与驱动方式 |
 
