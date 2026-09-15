@@ -62,6 +62,7 @@ VilAgent/
 | `review` | False | 只读 | review |
 
 `ask` / `review` 只暴露 readonly 工具；`write_file`、`run_command` 被屏蔽。
+
 只读由工具过滤强制；ask 的 prompt 也说明只读（双保险，且 ask/do 姿态分开）。
 
 ## 用法
@@ -98,6 +99,7 @@ cfg = load_config()                  # 与 DEFAULTS 深合并
 ```
 
 `DEFAULTS`：`llm.{endpoint,model,api_key,temperature(0.2),max_retries(3),retry_base_delay(0.5)}`、`stream(true)`、`default_mode(ask)`、`max_steps(50)`、`max_steps_total(200)`、`context_budget(8000=历史超此 token 数自动摘要；置 null 关闭)`、`lang(cn)`。
+
 文件只存用户实际设的字段（不把 DEFAULTS 写进文件污染），`load_config` 运行时合并。
 
 依赖：`pip install -r requirements.txt`（httpx + rich + tiktoken）。Windows 用户想用 L3 沙箱可手动 `pip install pywin32`。
@@ -171,6 +173,7 @@ def my_tool(foo: str, _ctx=None) -> str:
 ## 安全（三层防御，Windows 主力）
 
 参考 Claude Code：AST 不是安全边界（混淆代码永远能绕过字符串匹配），真正隔离靠运行时。
+
 Windows 没有 OS 级文件/网络沙箱（Claude Code 自己也没做），所以 **L2 权限层是 Windows 上的实际安全边界**。
 
 ```
@@ -190,7 +193,9 @@ Windows 没有 OS 级文件/网络沙箱（Claude Code 自己也没做），所�
 - **L2 `PermissionSystem`** → 工具调用前决策 `allow/ask/deny`。
   顺序：readonly 工具放行 → 内置 deny 硬底线（危险命令，**用户规则无法放行**）→ 用户规则命中 → 默认姿态。
   硬底线用 `match_dangerous_command()` 对命令做**规范化（小写+折叠空白）+ 正则 search**，可覆盖大小写（`RM -RF /`）、前缀（`sudo rm -rf /`）、拼接（`echo x && rm -rf /`）以及 Windows/PowerShell（`del`/`rd /s`/`format`/`Remove-Item -Recurse`）等绕过写法（`exec.py` 复用同一匹配器，避免两套口径不一致）。
+
   **默认姿态（trust 模式 / do 模式）**：写/编辑类工具（`write_file`/`edit_file`）自动 **allow**（低摩擦，自动化友好）；命令/代码执行类（`run_command`/`run_python`）**ask** 人工确认；破坏性工具（`delete_file`）因删除不可逆，亦单独 **ask**；`risk=high` 亦 **ask**。非 trust 模式写/执行一律 **deny**。
+
   **规则文件**（自动加载，无需传参）：优先 `<workspace>/.vil/permissions.json`，其次 `~/.vil/permissions.json`（`permissions_file` 传空串/None 均走此默认解析）；文件损坏时记录告警（`permission_warning` 事件）并忽略，不阻断循环。
   格式：`{"rules":[{"tool":"run_command","pattern":"git *","action":"allow"}]}`，fnmatch 对 `args["path"]` / `args["command"]` / `args["code"]` **逐个匹配，命中任一即算**。
   例：`{"tool":"run_command","action":"allow"}`（省略 `pattern`）可把该工具所有调用整体放行（充分自动化）；`{"tool":"write_file","pattern":"src/**","action":"deny"}` 可反向收紧。
@@ -236,6 +241,7 @@ Windows 没有 OS 级文件/网络沙箱（Claude Code 自己也没做），所�
 - `_on_tool_call` 特殊渲染：`todo_write` 调用时展开待办列表（图标 + 状态色），不截断；其他工具仍走 100 字符截断
 
 Schema:
+
 ```json
 {
   "todos": [
