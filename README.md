@@ -1,4 +1,4 @@
-# VilAgent
+# VilCode
 
 嵌入终端的**代码 Agent 运行时 / Harness**。本仓库不含模型权重：它是一套把任意 LLM 装配成代码 Agent 的外壳——ReAct 循环、工具集、记忆/状态、安全沙箱与终端 UI 都在这里，模型接口由 `llm.py` 统一抽象。运行中的 `AgentLoop` 实例（harness + 真实模型）才构成一个完整的 Agent，即 **Agent = Model + Harness**。Phase 0：纯 CLI，Agent 内嵌于进程内。
 
